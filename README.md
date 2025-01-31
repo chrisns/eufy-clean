@@ -8,7 +8,26 @@ It is originally based on [eufy-clean](https://github.com/martijnpoppen/eufy-cle
 - This code was ported and tested on a Robovac X10 Pro Omni, but it should work on other models as well 🤞🏼
 - This code is written by me for me, feel free to use it and open issues, and PRs. I will try to help as much as I can, but I can't guarantee anything.
 
+
 ## Usage
+
+### Home Assistant
+If you want to use this code with Home Assistant, you should be able to install it with HACS by adding this repo.
+
+To clean scenes, you can use the following service call:
+```yaml
+action: vacuum.send_command
+metadata: {}
+data:
+    command: scene_clean
+    params:
+        scene: 5
+target:
+    entity_id: vacuum.robovac_x10_pro_omni
+```
+worth noting that the `scene` parameter is the scene number, which I have just guessed based on the app.
+Seems like there is 3 default scenes end then your scenes start from 4 and increments one in the order you created them.
+
 
 ### Example
 If you want to use this code without using Home Assistant, you can use the `EufyClean` class directly. Here's a simple example of how to use it:
@@ -61,9 +80,13 @@ if __name__ == '__main__':
     asyncio.run(setup())
 ```
 
-### Home Assistant
-If you want to use this code with Home Assistant, you should be able to install it with HACS by adding this repo
-
+## Development
+There is things left to do here, like adding more commands and testing on other devices. If you want to help, feel free to open a PR.
+- Clean rooms
+- Track consumables, water, dustbin, and filter etc
+- Track errors
+- Map management
+- Many more...
 
 ## Contact
 For any questions or issues, please open an issue on the GitHub repository.
