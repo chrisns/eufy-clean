@@ -259,6 +259,40 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
             await self._fall_back_to_cloud()
             return
         await self.async_load_storage()
+        # Rooms are not on any DPS for local Tuya devices; pull them once over the
+        # encrypted P2P channel in the background so the connect path is not blocked.
+        self.hass.async_create_task(self._async_load_p2p_rooms())
+
+    async def _async_load_p2p_rooms(self) -> None:
+        """Fetch the room list over the local P2P map channel (Tuya devices).
+
+        Needs the RTC config (``device_password`` + ICE servers) from Tuya Cloud;
+        without a Tuya cloud session it is skipped and manual overrides still work.
+        """
+        tuya = self.eufy_login.tuya_client
+        if not tuya or not self._local_key or not self._local_host:
+            return
+        try:
+            rtc = await tuya.get_rtc_config(self.device_id)
+            if not rtc or not rtc.get("device_password"):
+                _LOGGER.debug("P2P rooms: no RTC config for %s", self.device_name)
+                return
+            from .api.p2p import fetch_rooms
+
+            rooms = await fetch_rooms(
+                host=self._local_host,
+                local_key=self._local_key,
+                device_id=self.device_id,
+                user_id="homeassistant",
+                device_password=rtc["device_password"],
+                ice_config=rtc.get("ice_config"),
+            )
+        except Exception as err:  # noqa: BLE001 - P2P is best-effort; never break the device
+            _LOGGER.debug("P2P room fetch failed for %s: %s", self.device_name, err)
+            return
+        if rooms:
+            _LOGGER.info("P2P: fetched %d rooms for %s", len(rooms), self.device_name)
+            self.async_set_updated_data(replace(self.data, rooms=rooms))
 
     async def _initialize_mqtt(self) -> None:
         """Initialize MQTT connection."""
