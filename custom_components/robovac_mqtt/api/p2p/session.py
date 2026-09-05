@@ -64,7 +64,7 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         self._queue.put_nowait(data)
 
 
-async def fetch_rooms(
+async def fetch_snapshot(
     host: str,
     local_key: str,
     device_id: str,
@@ -74,14 +74,17 @@ async def fetch_rooms(
     ice_config: dict | None = None,
     host_ip: str | None = None,
     timeout: float = 20.0,
-) -> list[dict]:
-    """Open a P2P session to ``host`` and return ``[{"id", "name"}, ...]``.
+    grace: float = 1.5,
+) -> bytes:
+    """Open a P2P session to ``host`` and return the conversation-5 byte stream.
 
     ``user_id`` is the account identity the offer is sent as. ``device_password``
     is the RTC-config password used to derive the conversation-0 credential.
     ``ice_config`` supplies the offer's ``token`` / ``tcp_token`` / ``log`` from
     the RTC config; without its ICE servers the device answers but never gathers
-    its host candidate. Raises :class:`TimeoutError` if the map does not arrive.
+    its host candidate. The device pushes the whole map in one burst; we keep
+    collecting for ``grace`` seconds after the first map segment, then return the
+    reassembled stream. Raises :class:`TimeoutError` if no map arrives.
     """
     key = local_key.encode()
     media_key = os.urandom(16)
@@ -168,9 +171,17 @@ async def fetch_rooms(
                         state["robot_addr"] = (match.group(1), int(match.group(2)))
                         send_udp(stun.binding_request(ufrag, state["robot_ufrag"], state["robot_pwd"], False))
 
-    async def media() -> list[dict]:
+    def assembled() -> bytes:
+        return b"".join(conv5[sn] for sn in sorted(conv5))
+
+    async def media() -> bytes:
+        deadline: float | None = None
         while True:
-            datagram = await udp_queue.get()
+            wait = None if deadline is None else max(0.0, deadline - loop.time())
+            try:
+                datagram = await asyncio.wait_for(udp_queue.get(), wait)
+            except asyncio.TimeoutError:
+                return assembled()  # grace elapsed after the map burst
             if stun.is_stun(datagram):
                 if stun.message_type(datagram) == stun.BIND_REQUEST and state["robot_addr"]:
                     send_udp(stun.binding_success(datagram, state["robot_addr"][0], state["robot_addr"][1], password.encode()))
@@ -189,10 +200,8 @@ async def fetch_rooms(
                 conv5[segment.sequence] = kcp.decrypt_record(media_key, segment.data)
                 while receive_next[kcp.CONV_MAP] in conv5:
                     receive_next[kcp.CONV_MAP] += 1
-                rooms = extract_rooms(b"".join(conv5[sn] for sn in sorted(conv5)))
-                if rooms is not None:
-                    _LOGGER.debug("p2p: extracted %d rooms", len(rooms))
-                    return rooms
+                if deadline is None:
+                    deadline = loop.time() + grace
 
     async def signaling_guard() -> None:
         try:
@@ -211,3 +220,8 @@ async def fetch_rooms(
             await writer.wait_closed()
         except Exception:  # noqa: BLE001 - closing a half-open socket may raise
             pass
+
+
+async def fetch_rooms(*args, **kwargs) -> list[dict]:
+    """Open a P2P session and return ``[{"id", "name"}, ...]`` (empty if none)."""
+    return extract_rooms(await fetch_snapshot(*args, **kwargs)) or []
