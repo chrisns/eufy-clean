@@ -21,6 +21,7 @@ from custom_components.robovac_mqtt.api.p2p.mapdata import (
     P2PMap,
     Pose,
 )
+from custom_components.robovac_mqtt.camera import EufyMapCamera
 from custom_components.robovac_mqtt.coordinator import EufyCleanCoordinator
 from custom_components.robovac_mqtt.p2p_map import P2PMapFeed
 
@@ -255,4 +256,16 @@ async def test_coordinator_restores_stored_p2p_map(hass, fake_session):
         assert coordinator.data.rooms == [{"id": 0, "name": "Kitchen"}]
         assert coordinator._map_data is not None
     coordinator.async_shutdown_timers()
+    await coordinator.async_stop_p2p()
+
+
+@pytest.mark.asyncio
+async def test_camera_exposes_rooms_and_obstacles(hass, fake_session):
+    coordinator = _local_coordinator(hass)
+    coordinator._start_p2p_feed()
+    coordinator.p2p.decoder.state.obstacles = [Obstacle("Shoe", ((-103, 442),))]
+    coordinator.data = replace(coordinator.data, rooms=[{"id": 0, "name": "Kitchen"}])
+    attrs = EufyMapCamera(coordinator).extra_state_attributes
+    assert attrs["rooms"] == {"0": "Kitchen"}
+    assert attrs["obstacles"] == [{"type": "Shoe", "x": -103, "y": 442}]
     await coordinator.async_stop_p2p()

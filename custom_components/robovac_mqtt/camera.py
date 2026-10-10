@@ -54,6 +54,13 @@ class EufyMapCamera(CoordinatorEntity[EufyCleanCoordinator], Camera):
             attrs["calibration_points"] = points
         if rooms := self.coordinator.data.rooms:
             attrs["rooms"] = {str(r["id"]): r.get("name", "") for r in rooms}
+        if self.coordinator.p2p is not None:
+            # Objects the robot recognised on its last runs, in world centimetres.
+            attrs["obstacles"] = [
+                {"type": o.object_type, "x": o.points[0][0], "y": o.points[0][1]}
+                for o in self.coordinator.p2p.state.obstacles
+                if o.points
+            ]
         return attrs
 
     async def async_camera_image(
