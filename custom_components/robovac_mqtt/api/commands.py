@@ -20,6 +20,8 @@ from ..const import (
     SCALAR_DPS,
     SCALAR_WORK_MODE_GO_HOME,
     SCALAR_WORK_MODE_START,
+    VIDEO_MGR_STREAM_CLOSE,
+    VIDEO_MGR_STREAM_OPEN,
     VOICE_CATALOG,
 )
 from ..proto.cloud.clean_param_pb2 import CleanParam, CleanParamRequest, Fan
@@ -82,6 +84,13 @@ REMOTE_DIRECTIONS: dict[str, RemoteCtrl.Direction] = {
     "left": RemoteCtrl.LEFT,
     "right": RemoteCtrl.RIGHT,
 }
+
+
+def build_video_manager_command(method: int) -> dict[str, str]:
+    """A DP 181 ``VideoMgrRequest{control{method, seq}}`` for the S1 Pro's camera."""
+    control = bytes([0x08, method, 0x10, 0x01])  # method = 1, seq = 2
+    body = bytes([0x0A, len(control)]) + control  # control = 1
+    return {DPS_MAP["VIDEO_MANAGER"]: base64.b64encode(encode_varint(len(body)) + body).decode()}
 
 
 def build_set_height_detection_command(mode: str) -> dict[str, str]:
@@ -688,6 +697,10 @@ def build_command(
         )
     if cmd == "set_fan_speed":
         return build_set_clean_speed_command(kwargs.get("fan_speed", ""))
+    if cmd == "video_stream_open":
+        return build_video_manager_command(VIDEO_MGR_STREAM_OPEN)
+    if cmd == "video_stream_close":
+        return build_video_manager_command(VIDEO_MGR_STREAM_CLOSE)
     if cmd == "set_height_detection":
         return build_set_height_detection_command(kwargs.get("mode", ""))
     if cmd == "start_remote":

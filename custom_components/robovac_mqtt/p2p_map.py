@@ -71,6 +71,22 @@ class P2PMapFeed:
         self.last_error: str | None = None
 
     @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def local_key(self) -> str:
+        return self._local_key
+
+    @property
+    def device_id(self) -> str:
+        return self._device_id
+
+    async def get_rtc(self) -> dict[str, Any]:
+        """The P2P credentials (device password + ICE config), cached and refreshed."""
+        return await self._get_rtc()
+
+    @property
     def state(self) -> P2PMap:
         return self.decoder.state
 

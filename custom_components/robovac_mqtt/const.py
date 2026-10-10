@@ -270,6 +270,12 @@ EUFY_CLEAN_NOVEL_CLEAN_SPEED = [
 ]
 
 
+# VideoMgrRequest.Control.Method (DP 181), from the app's own protobuf definitions.
+VIDEO_MGR_STATE_GET: Final = 1
+VIDEO_MGR_STATE_SET: Final = 2
+VIDEO_MGR_STREAM_OPEN: Final = 3
+VIDEO_MGR_STREAM_CLOSE: Final = 4
+
 # DPS 176 field 104 is `videoMgrSw` in the app's own Unisetting schema: the
 # robot's camera switch. It is enabled on the robot itself (hold Start/Pause +
 # Recharge for 10 s), never over the network, so we only ever read it.
@@ -582,6 +588,7 @@ DPS_MAP = {
     "MULTI_MAP_MANAGE": "172",
     "MAP_MANAGE": "169",
     "UNDISTURBED": "157",
+    "VIDEO_MANAGER": "181",  # S1 Pro camera stream control (VideoMgrRequest/Response)
 }
 
 # DPS keys that are known but intentionally not parsed.

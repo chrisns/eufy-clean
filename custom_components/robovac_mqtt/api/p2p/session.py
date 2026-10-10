@@ -134,6 +134,13 @@ class P2PSession:
         self._conversations: dict[int, kcp.KcpConversation] = {}
         self.bytes_received = 0
 
+    # What this session is waiting for, for log and error messages.
+    _stream_label = "map stream"
+
+    def _extra_conversations(self) -> dict[int, kcp.KcpConversation]:  # pylint: disable=no-self-use
+        """Additional KCP conversations a subclass wants opened (none for the map)."""
+        return {}
+
     @property
     def connected(self) -> bool:
         return self._first_object.is_set() and not self._closed.is_set()
@@ -161,6 +168,7 @@ class P2PSession:
                 kcp.CONV_MAP: kcp.KcpConversation(
                     kcp.CONV_MAP, self._media_key, self._send_udp, self._on_map_record
                 ),
+                **self._extra_conversations(),
             }
             reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self._host, ROBOT_PORT), 10
@@ -178,11 +186,11 @@ class P2PSession:
             ended.cancel()
             if not done:
                 raise P2PError(
-                    "no map stream from the robot"
+                    f"no {self._stream_label} from the robot"
                     + ("" if self._ice_up else " (ICE never connected)")
                 )
             if self._first_object.is_set():
-                _LOGGER.debug("p2p: map stream flowing from %s", self._host)
+                _LOGGER.debug("p2p: %s flowing from %s", self._stream_label, self._host)
                 await self._closed.wait()
             if self._failure is not None:
                 raise P2PError(str(self._failure)) from self._failure

@@ -120,6 +120,8 @@ class VacuumState:
     child_lock: bool = False  # Children lock switch
     height_detection: str | None = None  # S1 Pro height detection sensitivity
     camera_enabled: bool | None = None  # S1 Pro video switch (read-only)
+    # Last DP 181 video-manager reply as (method, result, monotonic time received).
+    video_response: tuple[int, int, float] | None = None
     dnd_enabled: bool = False  # Do Not Disturb switch
     dnd_start_hour: int = 22  # Do Not Disturb start hour
     dnd_start_minute: int = 0  # Do Not Disturb start minute

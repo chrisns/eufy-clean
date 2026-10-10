@@ -32,6 +32,7 @@ CMD_WINDOW_ASK = 0x53
 CMD_WINDOW_TELL = 0x54
 
 CONV_CONTROL = 0
+CONV_VIDEO = 1  # camera stream (RTP/H.265), opened by the IOCtrl video start
 CONV_MAP = 5
 
 _HEADER = struct.Struct("<IBBHIIII")

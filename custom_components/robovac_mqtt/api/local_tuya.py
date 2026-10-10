@@ -304,6 +304,7 @@ class LocalTuyaClient:
             return
         if not self._on_message:
             return
+        _LOGGER.debug("Local Tuya %s: received DPS %s", self.device_id, sorted(dps, key=str))
         # Match the wire format _handle_mqtt_message expects:
         #   {"payload": json.dumps({"data": <dps>})}
         # then the coordinator parses payload as JSON, extracts data.

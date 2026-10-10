@@ -58,6 +58,7 @@ from .const import (
 )
 from .models import VacuumState
 from .p2p_map import P2PMapFeed
+from .video_stream import RobotVideo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,6 +163,7 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         self._last_map_save: float = 0.0
         # Live map/rooms/path over the local P2P channel (local Tuya robots only).
         self.p2p: P2PMapFeed | None = None
+        self.video: RobotVideo | None = None
         self._p2p_render_cancel: CALLBACK_TYPE | None = None
         self._last_p2p_render: float = 0.0
         self._restore_p2p: dict[str, Any] | None = None
@@ -356,6 +358,8 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         self._p2p_render_cancel = async_call_later(self.hass, wait, _fire)
 
     async def async_stop_p2p(self) -> None:
+        if self.video is not None:
+            await self.video.stop()
         if self._p2p_render_cancel:
             self._p2p_render_cancel()
             self._p2p_render_cancel = None

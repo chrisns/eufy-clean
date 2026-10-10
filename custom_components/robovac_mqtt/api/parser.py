@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from collections.abc import Iterator
 from dataclasses import replace
 from typing import Any
@@ -588,6 +589,10 @@ def _process_other_dps(
                     _LOGGER.debug("Received MULTI_MAP_MANAGE (DPS 172): %.100s", value)
                     _parse_multi_map_response(value)
 
+            elif key == DPS_MAP["VIDEO_MANAGER"]:
+                if (reply := _parse_video_manager_reply(value)) is not None:
+                    changes["video_response"] = (*reply, time.monotonic())
+
             elif key == DPS_MAP["UNSETTING"]:
                 settings = decode(UnisettingResponse, value)
                 _LOGGER.debug("Decoded UnisettingResponse: %s", settings)
@@ -800,6 +805,39 @@ def _map_trigger_source(value: int) -> str:
     5: REMOTE_CTRL
     """
     return TRIGGER_SOURCE_NAMES.get(TriggerSource(value), "unknown")
+
+
+def _parse_video_manager_reply(value: Any) -> tuple[int, int] | None:
+    """Return ``(method, result)`` from a DP 181 VideoMgrResponse, or None.
+
+    ``result`` 0 (absent on the wire) is success; 1 means the robot refused.
+    """
+    try:
+        raw = base64.b64decode(value)
+        length, pos = decode_varint(raw, 0)
+        end = min(len(raw), pos + length)
+        while pos < end:
+            key, pos = decode_varint(raw, pos)
+            if key & 7 != 2:
+                return None
+            size, pos = decode_varint(raw, pos)
+            if key >> 3 == 1:  # control
+                method = result = 0
+                inner, stop = pos, pos + size
+                while inner < stop:
+                    inner_key, inner = decode_varint(raw, inner)
+                    if inner_key & 7 != 0:
+                        return None
+                    number, inner = decode_varint(raw, inner)
+                    if inner_key >> 3 == 1:
+                        method = number
+                    elif inner_key >> 3 == 3:
+                        result = number
+                return method, result
+            pos += size
+    except (ValueError, TypeError, IndexError):
+        return None
+    return None
 
 
 def _iter_unsetting_fields(value: Any) -> Iterator[tuple[int, int, bytes]]:

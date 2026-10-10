@@ -1,0 +1,317 @@
+"""Tests for the robot camera stream: RTP/H.265 reader, control packets, stream manager."""
+
+# pylint: disable=redefined-outer-name,protected-access
+
+import asyncio
+import struct
+import time
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from homeassistant.exceptions import HomeAssistantError
+
+from custom_components.robovac_mqtt.api.commands import build_command
+from custom_components.robovac_mqtt.api.p2p import control, kcp
+from custom_components.robovac_mqtt.api.p2p.video import RtpHevcReader, VideoSession
+from custom_components.robovac_mqtt.api.parser import (
+    _parse_video_manager_reply,
+    update_state,
+)
+from custom_components.robovac_mqtt.camera import (
+    EufyVideoCamera,
+    _add_video_camera_when_supported,
+)
+from custom_components.robovac_mqtt.const import VIDEO_MGR_STREAM_OPEN
+from custom_components.robovac_mqtt.models import VacuumState
+from custom_components.robovac_mqtt.video_stream import RobotVideo
+
+START = b"\x00\x00\x00\x01"
+SSRC = b"\x00\x00\x00\x0a"
+
+
+def rtp(seq: int, payload: bytes, *, marker: bool = False, first_byte: int = 0x80) -> bytes:
+    return bytes([first_byte, (0x80 if marker else 0) | 95]) + struct.pack(">HI", seq, 1000 + seq) + SSRC + payload
+
+
+def frame(packet: bytes, header_len: int = 36) -> bytes:
+    """A Tuya frame: a header of ``header_len`` bytes, the u32 packet length, the RTP packet."""
+    head = bytes([3, 0, 1, 0, 0, 0, 0, 0]) + bytes(header_len - 8 - 4)
+    return head + struct.pack("<I", len(packet)) + packet
+
+
+def nal(kind: int, body: bytes) -> bytes:
+    return bytes([kind << 1, 1]) + body  # H.265 NAL header: type in bits 1-6, layer 0, tid 1
+
+
+def read_all(reader: RtpHevcReader, data: bytes, chunk: int | None = None) -> list[bytes]:
+    pieces = [data] if chunk is None else [data[i : i + chunk] for i in range(0, len(data), chunk)]
+    return [unit for piece in pieces for unit in reader.feed(piece)]
+
+
+def test_single_nal_units_get_start_codes():
+    vps, sps = nal(32, b"vps-data"), nal(33, b"sps-data")
+    stream = frame(rtp(1, vps)) + frame(rtp(2, sps))
+    assert read_all(RtpHevcReader(), stream) == [START + vps, START + sps]
+
+
+def test_fragmentation_units_are_reassembled():
+    original = nal(19, b"A" * 40 + b"B" * 40 + b"C" * 20)  # an IDR slice
+    body = original[2:]
+    header = bytes([49 << 1, 1])
+    parts = [body[:40], body[40:80], body[80:]]
+    fu_type = 19
+    packets = [
+        rtp(1, header + bytes([0x80 | fu_type]) + parts[0]),
+        rtp(2, header + bytes([fu_type]) + parts[1]),
+        rtp(3, header + bytes([0x40 | fu_type]) + parts[2], marker=True),
+    ]
+    out = read_all(RtpHevcReader(), b"".join(frame(p) for p in packets))
+    assert out == [START + original]
+
+
+def test_aggregation_packets_are_split():
+    one, two = nal(39, b"sei"), nal(35, b"aud")
+    payload = bytes([48 << 1, 1]) + struct.pack(">H", len(one)) + one + struct.pack(">H", len(two)) + two
+    assert read_all(RtpHevcReader(), frame(rtp(1, payload))) == [START + one, START + two]
+
+
+def test_header_length_varies_and_rtp_first_byte_is_not_trusted():
+    """Key frames carry a longer Tuya header; later frames set extra bits in RTP byte 0."""
+    a, b = nal(32, b"a" * 10), nal(1, b"b" * 10)
+    stream = frame(rtp(1, a), header_len=36) + frame(rtp(2, b, first_byte=0xA8), header_len=30)
+    assert read_all(RtpHevcReader(), stream) == [START + a, START + b]
+
+
+def test_byte_at_a_time_feeding_gives_the_same_result():
+    units = [nal(32, b"x" * 30), nal(33, b"y" * 30), nal(1, b"z" * 200)]
+    stream = b"".join(frame(rtp(i + 1, u)) for i, u in enumerate(units))
+    reader = RtpHevcReader()
+    assert read_all(reader, stream, chunk=1) == [START + u for u in units]
+    assert reader.packets == 3 and reader.gaps == 0
+
+
+def test_a_lost_packet_drops_the_open_fragment_and_is_counted():
+    header = bytes([49 << 1, 1])
+    start = rtp(1, header + bytes([0x80 | 1]) + b"first-half")
+    end = rtp(3, header + bytes([0x40 | 1]) + b"second-half", marker=True)  # seq 2 never arrived
+    good = nal(1, b"next-frame")
+    reader = RtpHevcReader()
+    out = read_all(reader, frame(start) + frame(end) + frame(rtp(4, good)))
+    assert out == [START + good]
+    assert reader.gaps == 1
+
+
+def test_garbage_before_the_first_frame_is_skipped():
+    unit = nal(32, b"vps")
+    assert read_all(RtpHevcReader(), b"\xde\xad\xbe\xef" * 5 + frame(rtp(1, unit))) == [START + unit]
+
+
+def test_video_start_packets_are_auth_hello_caps_and_three_iocontrols():
+    packets = control.video_start_packets("pw", "k" * 16)
+    assert len(packets) == 6
+    assert packets[0] == control.start_packets("pw", "k" * 16)[0]  # same auth packet
+    parsed = [control.parse(p) for p in packets[1:]]
+    assert [(p.type, p.sub_command) for p in parsed] == [
+        (0, 0x0A), (0, 0x15), (0x10002, 9), (0x10003, 6), (0x10004, 0x40006),
+    ]
+    assert parsed[1].payload.endswith(b"}\x00") and b"capability_exchange_req" in parsed[1].payload
+    assert parsed[2].payload == struct.pack("<II", 0, 2)
+
+
+def test_video_session_hands_nal_units_out_and_counts_as_connected():
+    seen: list[bytes] = []
+    session = VideoSession(
+        on_nal=seen.append, host="127.0.0.1", local_key="k" * 16,
+        device_id="dev", device_password="pw",
+    )
+    assert set(session._extra_conversations()) == {kcp.CONV_VIDEO}
+    unit = nal(32, b"vps")
+    session._on_video_record(frame(rtp(1, unit)))
+    assert seen == [START + unit]
+    assert session._first_object.is_set()
+    assert session.bytes_received > 0
+
+
+def test_stream_commands_match_the_bytes_sent_to_a_real_robot():
+    assert build_command("video_stream_open") == {"181": "BgoECAMQAQ=="}
+    assert build_command("video_stream_close") == {"181": "BgoECAQQAQ=="}
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("DAoCCAMSBgoECgASAA==", (3, 0)),  # StreamOpen accepted (result absent = 0)
+        ("DgoECAMYARIGCgQKABIA", (3, 1)),  # StreamOpen refused
+        ("DAoCCAQSBgoECgASAA==", (4, 0)),  # StreamClose accepted
+        ("not base64!", None),
+        ("", None),
+    ],
+)
+def test_video_manager_replies_parse(reply, expected):
+    assert _parse_video_manager_reply(reply) == expected
+
+
+def test_update_state_records_the_video_reply_with_a_timestamp():
+    before = time.monotonic()
+    _, changes = update_state(VacuumState(api_type="novel"), {"181": "DAoCCAMSBgoECgASAA=="})
+    method, result, at = changes["video_response"]
+    assert (method, result) == (3, 0) and at >= before
+
+
+# -- the stream manager -------------------------------------------------------
+
+
+@pytest.fixture
+def coordinator():
+    coord = MagicMock()
+    coord.device_name = "Test Vac"
+    coord.data = VacuumState(api_type="novel", camera_enabled=True)
+    coord.build_device_command = MagicMock(side_effect=lambda name: {"181": name})
+    coord.async_send_command = AsyncMock()
+    return coord
+
+
+@pytest.fixture
+def video(coordinator):
+    return RobotVideo(MagicMock(), coordinator)
+
+
+@pytest.mark.asyncio
+async def test_hold_refuses_when_the_camera_is_switched_off(video, coordinator):
+    coordinator.data = VacuumState(api_type="novel", camera_enabled=False)
+    with pytest.raises(HomeAssistantError, match="switched off"):
+        async with video.hold():
+            pytest.fail("must not stream with the camera off")
+
+
+@pytest.mark.asyncio
+async def test_open_succeeds_on_a_zero_result_reply(video, coordinator):
+    async def reply(*_a, **_k):
+        coordinator.data = VacuumState(video_response=(VIDEO_MGR_STREAM_OPEN, 0, time.monotonic()))
+
+    coordinator.async_send_command.side_effect = reply
+    await video._open_robot_stream()
+    # wait=False: the reply is a push, so the write must not swallow it.
+    assert coordinator.async_send_command.await_args.kwargs == {"wait": False}
+
+
+@pytest.mark.asyncio
+async def test_open_reports_a_refusal(video, coordinator):
+    async def reply(*_a, **_k):
+        coordinator.data = VacuumState(video_response=(VIDEO_MGR_STREAM_OPEN, 1, time.monotonic()))
+
+    coordinator.async_send_command.side_effect = reply
+    with pytest.raises(HomeAssistantError, match="refused"):
+        await video._open_robot_stream()
+
+
+@pytest.mark.asyncio
+async def test_open_ignores_a_stale_reply_and_times_out(video, coordinator, monkeypatch):
+    coordinator.data = VacuumState(video_response=(VIDEO_MGR_STREAM_OPEN, 0, time.monotonic() - 60))
+    monkeypatch.setattr("custom_components.robovac_mqtt.video_stream._OPEN_REPLY_TIMEOUT", 0.3)
+    with pytest.raises(HomeAssistantError, match="did not answer"):
+        await video._open_robot_stream()
+
+
+@pytest.mark.asyncio
+async def test_jpegs_are_split_out_of_the_decoder_stream(video):
+    def jpeg(body: bytes) -> bytes:
+        return b"\xff\xd8" + body + b"\xff\xd9"
+
+    stream = asyncio.StreamReader()
+    stream.feed_data(jpeg(b"one") + jpeg(b"two")[:4])  # second frame split across reads
+    stream.feed_data(jpeg(b"two")[4:])
+    stream.feed_eof()
+    with pytest.raises(Exception, match="decoder stopped"):
+        await video._read_frames(stream)
+    assert video._frame == jpeg(b"two")
+    assert video.frame_age is not None and video.frame_age < 5
+
+
+@pytest.mark.asyncio
+async def test_wait_for_frame_returns_the_fresh_frame_immediately(video):
+    video._frame, video._frame_at = b"jpeg", time.monotonic()
+    assert await video.wait_for_frame(timeout=1) == b"jpeg"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_frame_gives_up_when_nothing_streams(video):
+    assert await video.wait_for_frame(timeout=0.2) is None
+
+
+def test_stream_close_is_sent_without_waiting(video, coordinator):
+    asyncio.run(video._close_robot_stream())
+    coordinator.async_send_command.assert_awaited_once_with({"181": "video_stream_close"}, wait=False)
+
+
+# -- the camera entity --------------------------------------------------------
+
+
+def make_camera(coordinator, video):
+    coordinator.device_id = "dev"
+    coordinator.last_update_success = True
+    coordinator.device_info = {}
+    return EufyVideoCamera(coordinator, video)
+
+
+def test_camera_is_unavailable_until_the_robot_camera_is_switched_on(coordinator, video):
+    camera = make_camera(coordinator, video)
+    assert camera.available is True
+    coordinator.data = VacuumState(api_type="novel", camera_enabled=False)
+    assert camera.available is False
+    assert camera.extra_state_attributes["camera_switch"] is False
+
+
+def test_camera_reports_frame_age_and_the_last_error(coordinator, video):
+    video._frame, video._frame_at = b"jpeg", time.monotonic() - 2
+    video.last_error = "robot refused"
+    attrs = make_camera(coordinator, video).extra_state_attributes
+    assert attrs["last_error"] == "robot refused"
+    assert 1.5 < attrs["frame_age_seconds"] < 5
+
+
+@pytest.mark.asyncio
+async def test_snapshot_holds_the_stream_while_it_waits_for_a_frame(coordinator, video):
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def hold():
+        calls.append("enter")
+        yield video
+        calls.append("exit")
+
+    video.hold = hold
+    video.wait_for_frame = AsyncMock(return_value=b"jpeg-bytes")
+    assert await make_camera(coordinator, video).async_camera_image() == b"jpeg-bytes"
+    assert calls == ["enter", "exit"]
+
+
+def test_camera_is_added_only_once_the_robot_reports_a_camera_switch(coordinator):
+    coordinator.api_type = "novel"
+    coordinator.p2p = object()
+    coordinator.video = None
+    coordinator.hass = MagicMock()
+    coordinator.device_id, coordinator.device_info = "dev", {}
+    coordinator.last_update_success = True
+    listeners = []
+    coordinator.async_add_listener = lambda cb: listeners.append(cb) or (lambda: None)
+    added: list = []
+    entry = MagicMock()
+
+    coordinator.data = VacuumState(api_type="novel")  # no camera switch reported yet
+    _add_video_camera_when_supported(entry, coordinator, added.extend)
+    assert not added
+
+    coordinator.data = VacuumState(api_type="novel", camera_enabled=True, received_fields={"camera_enabled"})
+    listeners[0]()
+    assert len(added) == 1 and isinstance(added[0], EufyVideoCamera)
+    listeners[0]()  # later updates must not add it again
+    assert len(added) == 1
+
+
+def test_no_video_camera_for_robots_without_the_novel_protocol(coordinator):
+    coordinator.api_type = "scalar"
+    coordinator.async_add_listener = MagicMock()
+    _add_video_camera_when_supported(MagicMock(), coordinator, lambda _e: pytest.fail("added"))
+    coordinator.async_add_listener.assert_not_called()

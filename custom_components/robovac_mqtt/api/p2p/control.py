@@ -45,6 +45,52 @@ def _auth_packet(credential: str) -> bytes:
     return _MAGIC + _AUTH_TYPE + bytes(body)
 
 
+def _command(kind: int, sub_command: int, payload: bytes = b"") -> bytes:
+    """Build ``magic | type | flag=0 | sub | len | payload`` (all little-endian u32)."""
+    return (
+        _MAGIC
+        + kind.to_bytes(4, "little")
+        + (0).to_bytes(4, "little")
+        + sub_command.to_bytes(4, "little")
+        + len(payload).to_bytes(4, "little")
+        + payload
+    )
+
+
+def _u32(*values: int) -> bytes:
+    return b"".join(v.to_bytes(4, "little") for v in values)
+
+
+# The capability exchange the app opens every IPC session with.
+_CAPABILITIES = (
+    b'{"cmd":"capability_exchange_req","protocol_version":1,'
+    b'"data":{"capabilities":{"opus_encode":1,"opus_decode":1}}}\x00'
+)
+
+
+def _io_control(request_id: int, command: int, op: int, *args: int) -> bytes:
+    """An IOCtrl request: type ``0x10000 | id``, sub ``(op << 16) | command``."""
+    return _command(0x10000 | request_id, (op << 16) | command, _u32(*args))
+
+
+def video_start_packets(device_password: str, local_key: str) -> list[bytes]:
+    """Return the conversation-0 packets that make the robot open its camera stream.
+
+    Auth, a hello and the capability exchange, then three IOCtrl requests (clarity,
+    then two video-channel starts). The robot answers each and opens conversation 1
+    with the RTP/H.265 stream. It only does so after the camera stream has been
+    opened with the ``StreamOpen`` video-manager command on DP 181.
+    """
+    return [
+        _auth_packet(auth_credential(device_password, local_key)),
+        _command(0, 0x0A, _u32(0x00010001)),
+        _command(0, 0x15, _CAPABILITIES),
+        _io_control(2, 9, 0, 0, 2),
+        _io_control(3, 6, 0, 0, 0),
+        _io_control(4, 6, 4, 0, 4),
+    ]
+
+
 def start_packets(device_password: str, local_key: str) -> list[bytes]:
     """Return the ordered conversation-0 packets, ready to wrap as KCP records."""
     return [_auth_packet(auth_credential(device_password, local_key)), _HELLO, _SUBSCRIBE]
