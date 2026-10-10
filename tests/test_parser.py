@@ -790,10 +790,18 @@ def test_height_detection_ignored_when_absent_or_unknown():
 
 
 def test_camera_switch_read_from_s1_pro_settings():
-    """DPS 176 field 105 is `videoMgrSw`; an empty wrapper is the proto3 default (off)."""
-    off = "EMIGAggBygYA0gYCCAHYBgI="  # field 105 present but empty
-    _, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: off})
+    """DPS 176 field 104 is `videoMgrSw`, the robot's camera switch.
+
+    Confirmed on a real S1 Pro: toggling Visual Anti-Drop in the app moves
+    field 105, not 104, and 104 reads on only after the on-robot button hold.
+    """
+    on = "EMIGAggBygYA0gYCCAHYBgI="
+    off = "DsIGAMoGANIGAggB2AYC"
+    _, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: on})
+    assert changes["camera_enabled"] is True
+    state, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: off})
     assert changes["camera_enabled"] is False
-    # No field 105 at all -> nothing reported rather than a false negative.
+    assert "camera_enabled" in state.received_fields
+    # A payload without field 104 reports nothing rather than a false negative.
     _, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: "A9gGAg=="})
     assert "camera_enabled" not in changes
