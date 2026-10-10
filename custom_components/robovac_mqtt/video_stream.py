@@ -36,7 +36,7 @@ LINGER_SECONDS = 20.0  # keep streaming this long after the last viewer leaves
 FIRST_FRAME_TIMEOUT = 15.0
 _OPEN_REPLY_TIMEOUT = 5.0
 _STALL_SECONDS = 10.0  # no new frame for this long -> restart the session
-_RETRY_BACKOFF = (2.0, 5.0, 15.0)
+_RETRY_BACKOFF = (2.0, 5.0, 15.0, 30.0, 60.0)  # a refusing robot is not hammered
 _JPEG_START, _JPEG_END = b"\xff\xd8", b"\xff\xd9"
 
 # H.265 NAL units in on stdin, one JPEG per frame out on stdout.
