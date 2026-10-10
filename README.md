@@ -43,6 +43,14 @@ A live floor plan camera entity (`camera.<device>_map`) streams the robot's map 
 
 Map size (256/512/1024/2048 px) and robot marker style configurable via integration options.
 
+### Robot Camera (S1 Pro)
+`camera.<device>_camera` shows the robot's own camera (H.265, 800x600 at about 10 fps) as a snapshot and an MJPEG stream, over the same local P2P channel as the map. Requires the local Tuya transport and an `ffmpeg` on the Home Assistant host (the stock container has one).
+
+- **Switched on at the robot, never from Home Assistant.** The camera is off until you hold **Start/Pause** and **Recharge** together for 10 seconds on the robot. The integration only reads that switch (`binary_sensor.<device>_camera_enabled`); the camera entity is unavailable while it is off.
+- **Only streams while someone is looking.** The first viewer opens the stream, it stays warm for 20 seconds, and the last viewer to leave closes it again.
+- **The robot decides when.** It refuses to open the stream while it is cleaning (the camera is busy navigating); the entity reports the refusal in `last_error`.
+- **Night views are dark.** There is no light on the robot.
+
 ### Vacuum Control
 - **Start / Stop / Pause** cleaning operations
 - **Return to dock** command
