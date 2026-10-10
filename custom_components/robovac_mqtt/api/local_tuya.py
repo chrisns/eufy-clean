@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -37,6 +38,10 @@ _LOGGER = logging.getLogger(__name__)
 _RECV_TIMEOUT = 5.0
 _RECONNECT_BACKOFF_INITIAL = 5.0
 _RECONNECT_BACKOFF_MAX = 60.0
+# The dock drops a local socket that stays silent for ~30 s; a heartbeat every
+# 10 s keeps it open, and a failed heartbeat is the only reliable sign that a
+# half-open socket has died (receive() just keeps timing out).
+_HEARTBEAT_INTERVAL = 10.0
 
 
 class LocalTuyaError(Exception):
@@ -180,11 +185,31 @@ class LocalTuyaClient:
                 f"Failed to send local Tuya command to {self.device_id}: {e}"
             ) from e
 
+    def _heartbeat(self) -> Any:
+        """Send a heartbeat and wait for the reply (blocking).
+
+        The reply can be a DPS push that was already in flight, so the caller
+        dispatches whatever comes back; an ``Error`` dict means the socket is dead.
+        """
+        if self._dev is None:
+            return {"Error": "not connected"}
+        return self._dev.heartbeat(nowait=False)
+
     async def _listen_loop(self) -> None:
         """Pump status() and receive() in the background, dispatching DPS pushes."""
         backoff = _RECONNECT_BACKOFF_INITIAL
+        next_heartbeat = time.monotonic() + _HEARTBEAT_INTERVAL
         while not self._stop:
             try:
+                if time.monotonic() >= next_heartbeat:
+                    next_heartbeat = time.monotonic() + _HEARTBEAT_INTERVAL
+                    async with self._dev_lock:
+                        reply = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                            None, self._heartbeat
+                        )
+                    if isinstance(reply, dict) and "Error" in reply:
+                        raise LocalTuyaError(f"heartbeat not acknowledged: {reply['Error']}")
+                    self._dispatch(reply)
                 # Hold the lock for one bounded receive() cycle then release it
                 # between cycles so send_command() can acquire it promptly.
                 async with self._dev_lock:
@@ -219,6 +244,7 @@ class LocalTuyaClient:
 
                 self._dispatch(payload)
                 backoff = _RECONNECT_BACKOFF_INITIAL  # any successful packet resets
+                next_heartbeat = time.monotonic() + _HEARTBEAT_INTERVAL
             except asyncio.CancelledError:
                 break
             except Exception as e:  # noqa: BLE001 - tinytuya raises broadly

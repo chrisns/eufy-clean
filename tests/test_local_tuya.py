@@ -389,3 +389,49 @@ def test_receive_with_timeout_guards_none_dev(patch_tinytuya):
     )
     assert client._dev is None
     assert client._receive_with_timeout() is None
+
+
+@pytest.mark.asyncio
+async def test_listener_heartbeat_failure_reconnects(patch_tinytuya, fake_dev):
+    """A half-open socket only shows up as a failed heartbeat: reconnect on it.
+
+    Without heartbeats the dock silently drops the idle socket and receive()
+    keeps timing out forever, so the coordinator never sees another update.
+    """
+    done = asyncio.Event()
+    fake_dev.receive.side_effect = _scripted_receive([None, None], done)
+    fake_dev.heartbeat.side_effect = [{"Error": "Network Error: Unable to Connect"}] + [None] * 50
+    client = LocalTuyaClient(device_id="dev1", local_key="k" * 16, host="1.2.3.4")
+    client.set_on_message(lambda _b: None)
+
+    sleeps: list[float] = []
+    with patch(
+        "custom_components.robovac_mqtt.api.local_tuya._HEARTBEAT_INTERVAL", 0
+    ), patch(
+        "custom_components.robovac_mqtt.api.local_tuya.asyncio.sleep",
+        new=_make_sleep_recorder(sleeps),
+    ):
+        await client.connect()
+        await _drive_until(done, client)
+
+    fake_dev.heartbeat.assert_called_with(nowait=False)
+    assert sleeps and sleeps[0] == 5.0
+    assert patch_tinytuya.Device.call_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_listener_dispatches_dps_carried_by_a_heartbeat_reply(patch_tinytuya, fake_dev):
+    """A DPS push that arrives as the heartbeat's reply must not be dropped."""
+    done = asyncio.Event()
+    fake_dev.status.return_value = {}
+    fake_dev.receive.side_effect = _scripted_receive([None], done)
+    fake_dev.heartbeat.side_effect = [{"dps": {"160": True}}] + [None] * 50
+    client = LocalTuyaClient(device_id="dev1", local_key="k" * 16, host="1.2.3.4")
+    received: list[bytes] = []
+    client.set_on_message(received.append)
+
+    with patch("custom_components.robovac_mqtt.api.local_tuya._HEARTBEAT_INTERVAL", 0):
+        await client.connect()
+        await _drive_until(done, client)
+
+    assert any(json.loads(json.loads(r)["payload"])["data"] == {"160": True} for r in received)
