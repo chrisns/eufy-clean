@@ -18,6 +18,7 @@ from custom_components.robovac_mqtt.proto.cloud.clean_statistics_pb2 import (
     CleanStatistics,
 )
 from custom_components.robovac_mqtt.proto.cloud.consumable_pb2 import ConsumableResponse
+from custom_components.robovac_mqtt.proto.cloud.error_code_pb2 import ErrorCode
 from custom_components.robovac_mqtt.proto.cloud.language_pb2 import LanguageResponse
 from custom_components.robovac_mqtt.proto.cloud.work_status_pb2 import WorkStatus
 from custom_components.robovac_mqtt.utils import encode_message
@@ -808,9 +809,6 @@ def test_camera_switch_read_from_s1_pro_settings():
 
 
 def _error_payload(**fields) -> str:
-    from custom_components.robovac_mqtt.proto.cloud.error_code_pb2 import ErrorCode
-    from custom_components.robovac_mqtt.utils import encode_message
-
     message = ErrorCode()
     message.error.extend(fields.get("error", []))
     message.warn.extend(fields.get("warn", []))

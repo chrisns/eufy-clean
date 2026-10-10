@@ -89,6 +89,8 @@ def test_update_state_error_code(mock_decode):
     # Mock ErrorCode
     mock_error = MagicMock(spec=ErrorCode)
     mock_error.warn = [1]  # CRASH BUFFER STUCK
+    mock_error.error = []
+    mock_error.new_code = MagicMock(error=[])
     mock_decode.return_value = mock_error
 
     dps = {DPS_MAP["ERROR_CODE"]: "some_encoded_string"}
