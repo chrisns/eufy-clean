@@ -47,6 +47,18 @@ async def async_setup_entry(
         )
 
         if coordinator.api_type == "novel":
+            # Read-only: the camera is armed on the robot itself by holding
+            # Start/Pause + Recharge for 10 s, never over the network.
+            entities.append(
+                RoboVacBinarySensor(
+                    coordinator,
+                    "camera_enabled",
+                    "Camera Enabled",
+                    lambda s: bool(s.camera_enabled),
+                    availability_fn=lambda s: "camera_enabled" in s.received_fields,
+                )
+            )
+
             # On while the robot is under manual control; the dashboard's drive
             # pad is only useful (and only shown) then.
             entities.append(

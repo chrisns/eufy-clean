@@ -119,6 +119,7 @@ class VacuumState:
     wifi_signal: float = -100.0  # AP signal strength in dBm (converted from 0-100%)
     child_lock: bool = False  # Children lock switch
     height_detection: str | None = None  # S1 Pro height detection sensitivity
+    camera_enabled: bool | None = None  # S1 Pro video switch (read-only)
     dnd_enabled: bool = False  # Do Not Disturb switch
     dnd_start_hour: int = 22  # Do Not Disturb start hour
     dnd_start_minute: int = 0  # Do Not Disturb start minute

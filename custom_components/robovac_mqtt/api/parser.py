@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Iterator
 from dataclasses import replace
 from typing import Any
 
@@ -16,6 +17,7 @@ from ..const import (
     DPS_MAP,
     DPS_ROBOT_TELEMETRY,
     DPS_UNSETTING_HEIGHT_DETECTION_FIELD,
+    DPS_UNSETTING_VIDEO_SWITCH_FIELD,
     EUFY_CLEAN_APP_TRIGGER_MODES,
     EUFY_CLEAN_ERROR_CODES,
     EUFY_CLEAN_NOVEL_CLEAN_SPEED,
@@ -46,7 +48,7 @@ from ..proto.cloud.undisturbed_pb2 import UndisturbedResponse
 from ..proto.cloud.unisetting_pb2 import UnisettingResponse
 from ..proto.cloud.universal_data_pb2 import UniversalDataResponse
 from ..proto.cloud.work_status_pb2 import WorkStatus
-from ..utils import decode, decode_varint, deduplicate_names
+from ..utils import decode, decode_varint, deduplicate_names, encode_varint
 from .parser_scalar import process_scalar_dps
 
 _LOGGER = logging.getLogger(__name__)
@@ -595,6 +597,9 @@ def _process_other_dps(
                 if settings.HasField("children_lock"):
                     changes["child_lock"] = settings.children_lock.value
                     track_received_field(state, changes, "child_lock")
+                if (cam := _extract_video_switch(value)) is not None:
+                    changes["camera_enabled"] = cam
+                    track_received_field(state, changes, "camera_enabled")
                 if (mode := _extract_height_detection(value)) is not None:
                     changes["height_detection"] = mode
                     track_received_field(state, changes, "height_detection")
@@ -797,33 +802,56 @@ def _map_trigger_source(value: int) -> str:
     return TRIGGER_SOURCE_NAMES.get(TriggerSource(value), "unknown")
 
 
-def _extract_height_detection(value: Any) -> str | None:
-    """Pull the height-detection mode out of a DPS 176 payload.
+def _iter_unsetting_fields(value: Any) -> Iterator[tuple[int, int, bytes]]:
+    """Walk a DPS 176 payload, yielding ``(field, wire_type, raw)`` for each entry.
 
-    The S1 Pro reports its settings as fields (104-107) the bundled
-    ``UnisettingResponse`` does not define, so this walks the wire format for the
-    one varint we know: field 107, the sensitivity level.
+    The S1 Pro packs settings into fields 104-107 that the bundled
+    ``UnisettingResponse`` does not define, so these are read off the wire.
+    """
+    raw = base64.b64decode(value)
+    length, pos = decode_varint(raw, 0)
+    end = min(len(raw), pos + length)
+    while pos < end:
+        key, pos = decode_varint(raw, pos)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            number, pos = decode_varint(raw, pos)
+            yield field, wire, encode_varint(number)
+        elif wire == 2:
+            size, pos = decode_varint(raw, pos)
+            yield field, wire, raw[pos : pos + size]
+            pos += size
+        elif wire == 5:
+            yield field, wire, raw[pos : pos + 4]
+            pos += 4
+        elif wire == 1:
+            yield field, wire, raw[pos : pos + 8]
+            pos += 8
+        else:
+            return
+
+
+def _extract_video_switch(value: Any) -> bool | None:
+    """Read the camera switch (field 105) out of a DPS 176 payload.
+
+    The field holds a bool wrapper: an absent or empty submessage is the proto3
+    default, i.e. the camera is off.
     """
     try:
-        raw = base64.b64decode(value)
-        length, pos = decode_varint(raw, 0)
-        end = min(len(raw), pos + length)
-        while pos < end:
-            key, pos = decode_varint(raw, pos)
-            field, wire = key >> 3, key & 7
-            if wire == 0:
-                number, pos = decode_varint(raw, pos)
-                if field == DPS_UNSETTING_HEIGHT_DETECTION_FIELD:
-                    return HEIGHT_DETECTION_MODES.get(number)
-            elif wire == 2:
-                size, pos = decode_varint(raw, pos)
-                pos += size
-            elif wire == 5:
-                pos += 4
-            elif wire == 1:
-                pos += 8
-            else:
-                return None
+        for field, _wire, raw in _iter_unsetting_fields(value):
+            if field == DPS_UNSETTING_VIDEO_SWITCH_FIELD:
+                return bool(raw) and raw != b"\x08\x00"
+    except (ValueError, TypeError, IndexError):
+        return None
+    return None
+
+
+def _extract_height_detection(value: Any) -> str | None:
+    """Pull the height-detection mode (field 107) out of a DPS 176 payload."""
+    try:
+        for field, wire, raw in _iter_unsetting_fields(value):
+            if field == DPS_UNSETTING_HEIGHT_DETECTION_FIELD and wire == 0:
+                return HEIGHT_DETECTION_MODES.get(decode_varint(raw, 0)[0])
     except (ValueError, TypeError, IndexError):
         return None
     return None

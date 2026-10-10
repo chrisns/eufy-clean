@@ -270,6 +270,11 @@ EUFY_CLEAN_NOVEL_CLEAN_SPEED = [
 ]
 
 
+# DPS 176 field 105 is `videoMgrSw` in the app's own Unisetting schema: the
+# robot's camera switch. It is enabled on the robot itself (hold Start/Pause +
+# Recharge for 10 s), never over the network, so we only ever read it.
+DPS_UNSETTING_VIDEO_SWITCH_FIELD: Final = 105
+
 # Height Detection Sensitivity (S1 Pro, DPS 176 field 107) wire value -> name. The
 # app lists Safe/Medium/Free as 0/1/2; the robot's field is one higher (0 = unset).
 HEIGHT_DETECTION_MODES: Final[dict[int, str]] = {1: "Safe", 2: "Medium", 3: "Free"}

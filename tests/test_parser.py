@@ -787,3 +787,13 @@ def test_height_detection_ignored_when_absent_or_unknown():
     # An X-series style payload with no field 107, and a value outside 1-3.
     _, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: "A9gGBw=="})
     assert "height_detection" not in changes
+
+
+def test_camera_switch_read_from_s1_pro_settings():
+    """DPS 176 field 105 is `videoMgrSw`; an empty wrapper is the proto3 default (off)."""
+    off = "EMIGAggBygYA0gYCCAHYBgI="  # field 105 present but empty
+    _, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: off})
+    assert changes["camera_enabled"] is False
+    # No field 105 at all -> nothing reported rather than a false negative.
+    _, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: "A9gGAg=="})
+    assert "camera_enabled" not in changes
