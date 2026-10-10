@@ -195,14 +195,23 @@ unavailable just because the LAN address has shifted.
 > integration debug logs that might contain it into public issues.
 
 > [!NOTE]
-> On Tuya-transport devices the map and room list are not on MQTT; they ride an
-> encrypted local P2P channel. This integration now opens and decodes that
-> channel, so the room list and the floor-map camera work on Tuya devices too
-> (verified end to end on the S1 Pro, T2080A). Live X/Y position and cleaning
-> path ride the same channel and are reachable, but are not exposed as entities
-> yet. See `docs/P2P_MAP_CHANNEL.md`. Everything else (vacuum/mop mode, water
-> level, clean count, spot/zone/room commands, station status, consumables,
-> lifetime stats, all sensors) works over both transports.
+> On Tuya-transport devices the map, rooms and cleaning path are not on any DPS;
+> they ride an encrypted local P2P channel. The integration keeps a P2P session
+> open on the LAN (streaming while the robot moves, refreshing while it rests)
+> and decodes it, so on Tuya devices you get the same experience as MQTT ones:
+>
+> - the room list with the names set in the app (room cleaning, HA areas/segments,
+>   the room select, tap-a-room on the bundled card);
+> - a live floor-map camera with room colours and labels, the robot's position
+>   and heading, the cleaning path, obstacles, restricted zones and the rooms
+>   being cleaned;
+> - the active map id, so room and zone commands target the right map.
+>
+> Verified end to end on the S1 Pro (T2080A). The channel is documented in
+> `docs/P2P_MAP_CHANNEL.md`. The P2P password comes from your Tuya Cloud session,
+> so the feed needs that login to succeed once; everything else (vacuum/mop mode,
+> water level, spot/zone/room commands, station, consumables, lifetime stats)
+> works over both transports.
 
 ### Optional: Manual room name overrides
 
