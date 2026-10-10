@@ -198,10 +198,32 @@ class P2PSession:
             self._closed.set()
             for task in tasks:
                 task.cancel()
+            await self._say_goodbye()
             self._shutdown()
 
     async def close(self) -> None:
         self._closed.set()
+
+    async def _say_goodbye(self) -> None:
+        """Tell the robot the session is over, so it frees the slot now.
+
+        The robot only allows a few concurrent sessions and, if we just drop the
+        socket, may hold the slot until its own timeout; the signalling it sends us
+        when it ends a session (``type: disconnect``) is the polite way out.
+        """
+        if self._writer is None or self._writer.is_closing() or self._robot_pwd is None:
+            return
+        try:
+            self._send_tcp(
+                CMD_RTC,
+                {
+                    "header": self._header("disconnect"),
+                    "msg": {"close_reason": 0, "close_reason_local": 0},
+                },
+            )
+            await asyncio.wait_for(self._writer.drain(), 1.0)
+        except (OSError, TimeoutError):
+            pass  # the socket closes right after this either way
 
     def _fail(self, err: BaseException) -> None:
         if not self._closed.is_set():

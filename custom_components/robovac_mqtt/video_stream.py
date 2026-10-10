@@ -39,6 +39,19 @@ _STALL_SECONDS = 10.0  # no new frame for this long -> restart the session
 _RETRY_BACKOFF = (2.0, 5.0, 15.0)
 _JPEG_START, _JPEG_END = b"\xff\xd8", b"\xff\xd9"
 
+# H.265 NAL units in on stdin, one JPEG per frame out on stdout.
+# * Low latency comes from a small probe and `low_delay`, NOT `-fflags nobuffer`,
+#   which makes ffmpeg emit nothing for a raw H.265 pipe.
+# * The robot's video is limited-range YUV, which the MJPEG encoder only accepts as
+#   full-range (`yuvj420p`); without the conversion it fails to open.
+FFMPEG_ARGS: tuple[str, ...] = (
+    "-loglevel", "error",
+    "-probesize", "65536", "-analyzeduration", "0", "-flags", "low_delay",
+    "-f", "hevc", "-i", "pipe:0",
+    "-an", "-pix_fmt", "yuvj420p",
+    "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "5", "pipe:1",
+)
+
 
 def _ffmpeg_binary(hass: HomeAssistant) -> str:
     """The ffmpeg to run: the one Home Assistant's ffmpeg integration is configured
@@ -167,9 +180,7 @@ class RobotVideo:
 
         ffmpeg = await asyncio.create_subprocess_exec(
             _ffmpeg_binary(self._hass),
-            "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
-            "-f", "hevc", "-i", "pipe:0",
-            "-an", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "5", "pipe:1",
+            *FFMPEG_ARGS,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,

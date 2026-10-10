@@ -3,7 +3,9 @@
 # pylint: disable=redefined-outer-name,protected-access
 
 import asyncio
+import shutil
 import struct
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
@@ -13,6 +15,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.robovac_mqtt.api.commands import build_command
 from custom_components.robovac_mqtt.api.p2p import control, kcp
+from custom_components.robovac_mqtt.api.p2p.framing import CMD_RTC, decode_frames
 from custom_components.robovac_mqtt.api.p2p.video import RtpHevcReader, VideoSession
 from custom_components.robovac_mqtt.api.parser import (
     _parse_video_manager_reply,
@@ -24,7 +27,7 @@ from custom_components.robovac_mqtt.camera import (
 )
 from custom_components.robovac_mqtt.const import VIDEO_MGR_STREAM_OPEN
 from custom_components.robovac_mqtt.models import VacuumState
-from custom_components.robovac_mqtt.video_stream import RobotVideo
+from custom_components.robovac_mqtt.video_stream import FFMPEG_ARGS, RobotVideo
 
 START = b"\x00\x00\x00\x01"
 SSRC = b"\x00\x00\x00\x0a"
@@ -315,3 +318,81 @@ def test_no_video_camera_for_robots_without_the_novel_protocol(coordinator):
     coordinator.async_add_listener = MagicMock()
     _add_video_camera_when_supported(MagicMock(), coordinator, lambda _e: pytest.fail("added"))
     coordinator.async_add_listener.assert_not_called()
+
+
+# -- closing a session politely -----------------------------------------------
+
+
+class _FakeWriter:
+    def __init__(self, closing: bool = False) -> None:
+        self.data = b""
+        self._closing = closing
+
+    def write(self, data: bytes) -> None:
+        self.data += data
+
+    async def drain(self) -> None:  # pylint: disable=no-self-use
+        return None
+
+    def is_closing(self) -> bool:
+        return self._closing
+
+
+def _session() -> VideoSession:
+    return VideoSession(
+        on_nal=lambda _nal: None, host="127.0.0.1", local_key="k" * 16,
+        device_id="dev", device_password="pw",
+    )
+
+
+@pytest.mark.asyncio
+async def test_closing_an_established_session_sends_a_disconnect():
+    session = _session()
+    session._writer = _FakeWriter()
+    session._robot_pwd = b"answered"  # the robot answered our offer, so a session exists
+    await session._say_goodbye()
+    frames, _ = decode_frames(b"k" * 16, session._writer.data)
+    assert [(c, p["header"]["type"]) for c, p in frames] == [(CMD_RTC, "disconnect")]
+    assert frames[0][1]["header"]["sessionid"] == session._session_id
+
+
+@pytest.mark.asyncio
+async def test_no_disconnect_before_the_robot_has_answered_or_after_the_socket_closed():
+    session = _session()
+    session._writer = _FakeWriter()
+    await session._say_goodbye()  # never answered
+    assert session._writer.data == b""
+    session._robot_pwd = b"answered"
+    session._writer = _FakeWriter(closing=True)
+    await session._say_goodbye()
+    assert session._writer.data == b""
+
+
+# -- the ffmpeg command --------------------------------------------------------
+
+
+def test_ffmpeg_args_avoid_the_two_flags_that_broke_the_pipeline():
+    # `-fflags nobuffer` yields no output at all for a raw H.265 pipe.
+    assert "nobuffer" not in " ".join(FFMPEG_ARGS)
+    # The MJPEG encoder refuses limited-range YUV unless converted to full range.
+    assert FFMPEG_ARGS[FFMPEG_ARGS.index("-pix_fmt") + 1] == "yuvj420p"
+    assert FFMPEG_ARGS[-1] == "pipe:1" and "pipe:0" in FFMPEG_ARGS
+
+
+def _can_encode_hevc() -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, check=False)
+    return "libx265" in encoders.stdout
+
+
+@pytest.mark.skipif(not _can_encode_hevc(), reason="needs ffmpeg with libx265")
+def test_ffmpeg_turns_an_h265_stream_into_jpegs():
+    """End to end with a generated stream (no real camera frames in the repo)."""
+    make = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10",
+         "-t", "1", "-c:v", "libx265", "-x265-params", "log-level=none", "-f", "hevc", "pipe:1"],
+        capture_output=True, check=True,
+    )
+    out = subprocess.run(["ffmpeg", *FFMPEG_ARGS], input=make.stdout, capture_output=True, check=True).stdout
+    assert out.count(b"\xff\xd8") >= 5 and out.count(b"\xff\xd9") >= 5
