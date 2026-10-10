@@ -805,3 +805,37 @@ def test_camera_switch_read_from_s1_pro_settings():
     # A payload without field 104 reports nothing rather than a false negative.
     _, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: "A9gGAg=="})
     assert "camera_enabled" not in changes
+
+
+def _error_payload(**fields) -> str:
+    from custom_components.robovac_mqtt.proto.cloud.error_code_pb2 import ErrorCode
+    from custom_components.robovac_mqtt.utils import encode_message
+
+    message = ErrorCode()
+    message.error.extend(fields.get("error", []))
+    message.warn.extend(fields.get("warn", []))
+    message.new_code.error.extend(fields.get("new_error", []))
+    return encode_message(message)
+
+
+def test_a_fault_in_error_is_reported_when_warn_is_empty():
+    """Previously only warn[0] was read, so a real fault showed as code 0 / no message."""
+    _, changes = update_state(VacuumState(), {DPS_MAP["ERROR_CODE"]: _error_payload(error=[74])})
+    assert changes["error_code"] == 74
+    assert changes["error_message"]
+
+
+def test_a_newly_raised_fault_is_reported():
+    _, changes = update_state(VacuumState(), {DPS_MAP["ERROR_CODE"]: _error_payload(new_error=[75])})
+    assert changes["error_code"] == 75
+
+
+def test_faults_outrank_warnings_and_zeros_are_ignored():
+    payload = _error_payload(error=[0, 74], warn=[9])
+    _, changes = update_state(VacuumState(), {DPS_MAP["ERROR_CODE"]: payload})
+    assert changes["error_code"] == 74
+
+
+def test_no_fault_clears_the_error():
+    _, changes = update_state(VacuumState(), {DPS_MAP["ERROR_CODE"]: _error_payload()})
+    assert changes["error_code"] == 0 and changes["error_message"] == ""

@@ -492,12 +492,25 @@ def _process_other_dps(
             elif key == DPS_MAP["ERROR_CODE"]:
                 error_proto = decode(ErrorCode, value)
                 _LOGGER.debug("Decoded ErrorCode: %s", error_proto)
-                # Repeated Scalar Field (warn) acts like a list
-                if len(error_proto.warn) > 0:
-                    code = error_proto.warn[0]
+                # Faults arrive in `error`, newly raised ones in `new_code`, and
+                # advisories in `warn`; report the first real (non-zero) one in
+                # that order, so a fault is not hidden behind an empty warn list.
+                code = next(
+                    (
+                        c
+                        for c in (
+                            *error_proto.error,
+                            *error_proto.new_code.error,
+                            *error_proto.warn,
+                        )
+                        if c
+                    ),
+                    0,
+                )
+                if code:
                     changes["error_code"] = code
                     changes["error_message"] = EUFY_CLEAN_ERROR_CODES.get(
-                        code, "Unknown Error"
+                        code, f"Unknown Error ({code})"
                     )
                 else:
                     changes["error_code"] = 0
