@@ -51,6 +51,15 @@ def _add_video_camera_when_supported(
     unsub: Callable[[], None] | None = None
 
     @callback
+    def _remove_listener() -> None:
+        # Called when the camera is added and again on unload: only remove it once,
+        # or the coordinator raises KeyError and the entry cannot be unloaded.
+        nonlocal unsub
+        if unsub is not None:
+            unsub()
+            unsub = None
+
+    @callback
     def _check() -> None:
         nonlocal added
         if added or coordinator.p2p is None:
@@ -58,14 +67,13 @@ def _add_video_camera_when_supported(
         if "camera_enabled" not in coordinator.data.received_fields:
             return
         added = True
-        if unsub is not None:
-            unsub()
+        _remove_listener()
         if coordinator.video is None:
             coordinator.video = RobotVideo(coordinator.hass, coordinator)
         async_add_entities([EufyVideoCamera(coordinator, coordinator.video)])
 
     unsub = coordinator.async_add_listener(_check)
-    config_entry.async_on_unload(unsub)
+    config_entry.async_on_unload(_remove_listener)
     _check()
 
 

@@ -298,7 +298,8 @@ def test_camera_is_added_only_once_the_robot_reports_a_camera_switch(coordinator
     coordinator.device_id, coordinator.device_info = "dev", {}
     coordinator.last_update_success = True
     listeners = []
-    coordinator.async_add_listener = lambda cb: listeners.append(cb) or (lambda: None)
+    removals: list[int] = []
+    coordinator.async_add_listener = lambda cb: listeners.append(cb) or (lambda: removals.append(1))
     added: list = []
     entry = MagicMock()
 
@@ -311,6 +312,11 @@ def test_camera_is_added_only_once_the_robot_reports_a_camera_switch(coordinator
     assert len(added) == 1 and isinstance(added[0], EufyVideoCamera)
     listeners[0]()  # later updates must not add it again
     assert len(added) == 1
+    # The listener is removed when the camera is added; the entry's unload then runs
+    # the same callback again, which must not remove it a second time (KeyError in HA).
+    assert removals == [1]
+    entry.async_on_unload.call_args.args[0]()
+    assert removals == [1]
 
 
 def test_no_video_camera_for_robots_without_the_novel_protocol(coordinator):
