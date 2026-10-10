@@ -152,6 +152,28 @@ Path points are 5 bytes: `x i16 BE | y i16 BE | flags` (cm). Flags low nibble:
 6. ACK every conv-5 PUSH (tagged), reassemble records by `sn`/`frg`, decrypt,
    split into chunks, decode the objects.
 
+## When the robot refuses sessions
+
+The robot answers every offer and then closes the session with a type-32
+`disconnect` carrying `close_reason` / `close_reason_local`. Observed:
+
+| `close_reason` | Meaning |
+| --- | --- |
+| `6` | Normal: the session sat idle (nothing to send) and the robot ended it |
+| `12` | The session could not be created. Seen while the robot is being driven by hand (remote control), and consistent with the SDK's "incoming connection refused: current/max" limit |
+| `4` (with `close_reason_local: 7`) | Torn down before it ever reached the connected state, 70 ms after ICE comes up and before any control packet; the SDK uses 4 as its default for that |
+
+The robot only allows a few concurrent sessions, and the video path allocates
+large media buffers. Hammering it with sessions it keeps refusing (a reconnect
+loop while it is remote controlled, many aborted probes) can leave it refusing
+every new session, including the map feed, until it is restarted (hold the
+power button, or the power switch). Home Assistant's own feed therefore backs off
+while the robot is remote controlled, sessions send a `disconnect` when they
+close, and the camera backs off up to 60 s between attempts.
+
+The robot's `DeviceMgrRequest.Control.Method.SoftwareReboot` (DP 196) is
+acknowledged but did nothing outside a firmware update.
+
 ## Security
 
 Trusted-LAN only, like the rest of the local Tuya transport. The local key and
