@@ -74,6 +74,31 @@ def _build_offer_sdp(session_id: str, ufrag: str, password: str, aes_key_hex: st
     )
 
 
+def _adopt_cloud_session(session: P2PSession, cloud: dict[str, Any]) -> bool:
+    """Take the session identity the cloud reserved on the robot (see ``get_rtc_config``).
+
+    Opening a session with anything else leaves that reservation unused, and the
+    robot only has a handful of slots.
+    """
+    try:
+        media_key = bytes.fromhex(cloud["aesKey"])
+        if len(media_key) != 16:
+            return False
+        session_id, ufrag, pwd = cloud["sessionId"], cloud["iceUfrag"], cloud["icePassword"]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not all(isinstance(v, str) and v for v in (session_id, ufrag, pwd)):
+        return False
+    session._media_key = media_key  # pylint: disable=protected-access
+    session._session_id = session_id  # pylint: disable=protected-access
+    session._ufrag, session._ice_pwd = ufrag, pwd  # pylint: disable=protected-access
+    if cloud.get("traceId"):
+        session._trace_id = cloud["traceId"]  # pylint: disable=protected-access
+    if cloud.get("uid"):
+        session._user_id = cloud["uid"]  # pylint: disable=protected-access
+    return True
+
+
 def local_ip_towards(host: str) -> str:
     """Return the local interface address that routes to ``host``."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
@@ -103,6 +128,7 @@ class P2PSession:
         ice_config: dict[str, Any] | None = None,
         user_id: str = "homeassistant",
         host_ip: str | None = None,
+        cloud_session: dict[str, Any] | None = None,
     ) -> None:
         self._host = host
         self._local_key = local_key
@@ -118,6 +144,8 @@ class P2PSession:
         self._ufrag, self._ice_pwd = _random(4), _random(24)
         self._session_id = f"{device_id}{int(time.time())}{_random(8)}"
         self._trace_id = f"ipc_p2p_ios_{device_id}_{int(time.time())}000"
+        if cloud_session and _adopt_cloud_session(self, cloud_session):
+            _LOGGER.debug("p2p: using the cloud-issued session %s", self._session_id)
 
         self._robot_ufrag: str | None = None
         self._robot_pwd: bytes | None = None

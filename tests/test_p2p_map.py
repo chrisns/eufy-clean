@@ -58,7 +58,11 @@ class _FakeSession:
 def fake_session():
     _FakeSession.script = []
     _FakeSession.instances = []
-    with patch.object(p2p_map, "P2PSession", _FakeSession):
+    with (
+        patch.object(p2p_map, "P2PSession", _FakeSession),
+        # No real sockets in tests: the robot counts as reachable.
+        patch.object(P2PMapFeed, "_robot_reachable", AsyncMock(return_value=True)),
+    ):
         yield _FakeSession
 
 
@@ -274,3 +278,66 @@ async def test_camera_exposes_rooms_and_obstacles(hass, fake_session):
     assert attrs["robot"] == {"x": 3, "y": -4, "theta": 157}
     assert attrs["dock"] == {"x": 1, "y": -29}
     await coordinator.async_stop_p2p()
+
+
+# -- the cloud config is single-use ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_session_fetches_a_fresh_config_and_uses_its_cloud_session(hass, fake_session):
+    """Every fetch reserves a slot on the robot until a session uses it, so never cache."""
+    configs = [
+        {"device_password": "pw", "ice_config": {}, "session": {"sessionId": "first"}},
+        {"device_password": "pw", "ice_config": {}, "session": {"sessionId": "second"}},
+    ]
+    fetch = AsyncMock(side_effect=configs)
+    fake_session.script = [[("navPath.bin", _pose_obj(1, 2, 3))], [("navPath.bin", _pose_obj(4, 5, 6))]]
+    feed = P2PMapFeed(
+        hass, host="192.168.1.50", local_key="0123456789abcdef", device_id="dev",
+        rtc_config=fetch, is_active=lambda: True, on_change=lambda _c: None, name="S1 Pro",
+    )
+    with patch.object(p2p_map, "_ACTIVE_RETRY", 0.01):
+        feed.start()
+        await _until(lambda: len(fake_session.instances) >= 2)
+    await feed.stop()
+    assert fetch.await_count >= 2
+    assert [i.kwargs["cloud_session"]["sessionId"] for i in fake_session.instances[:2]] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_no_config_is_fetched_when_the_robot_is_unreachable(hass, fake_session):
+    fetch = AsyncMock(return_value=_RTC)
+    feed = P2PMapFeed(
+        hass, host="192.168.1.50", local_key="0123456789abcdef", device_id="dev",
+        rtc_config=fetch, is_active=lambda: False, on_change=lambda _c: None, name="S1 Pro",
+    )
+    with patch.object(P2PMapFeed, "_robot_reachable", AsyncMock(return_value=False)):
+        feed.start()
+        await _until(lambda: feed.failures >= 1)
+    await feed.stop()
+    fetch.assert_not_awaited()
+    assert "not reachable" in feed.last_error
+    assert not fake_session.instances
+
+
+@pytest.mark.asyncio
+async def test_repeated_quick_failures_trigger_a_long_cooldown(hass, fake_session):
+    """Each failed attempt wastes a reserved slot, so stop trying for a while."""
+    fake_session.script = [OSError("refused")] * 10
+    waits: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy(awaitable, timeout=None):
+        if timeout is not None and timeout > 1:
+            waits.append(timeout)
+        return await real_wait_for(awaitable, 0.01)
+
+    with (
+        patch.object(p2p_map, "_ACTIVE_RETRY", 0.01),
+        patch.object(p2p_map.asyncio, "wait_for", spy),
+    ):
+        feed = _feed(hass, active=True)
+        feed.start()
+        await _until(lambda: feed.failures >= 4)
+        await feed.stop()
+    assert p2p_map._FAILURE_COOLDOWN in waits

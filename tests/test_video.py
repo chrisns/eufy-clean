@@ -402,3 +402,48 @@ def test_ffmpeg_turns_an_h265_stream_into_jpegs():
     )
     out = subprocess.run(["ffmpeg", *FFMPEG_ARGS], input=make.stdout, capture_output=True, check=True).stdout
     assert out.count(b"\xff\xd8") >= 5 and out.count(b"\xff\xd9") >= 5
+
+
+# -- the cloud's pre-session ------------------------------------------------------
+
+_CLOUD = {
+    "sessionId": "devid1700000000AbCdEfGh", "iceUfrag": "tEst", "icePassword": "FakeIcePassword0123456789",
+    "aesKey": "00112233445566778899aabbccddeeff", "traceId": "0123456789abcdef0123456789abcdef",
+    "uid": "eu0000000000000test",
+}
+
+
+def test_a_session_adopts_the_session_the_cloud_reserved_on_the_robot():
+    session = VideoSession(
+        on_nal=lambda _n: None, host="127.0.0.1", local_key="k" * 16, device_id="dev",
+        device_password="pw", cloud_session=_CLOUD,
+    )
+    assert session._session_id == _CLOUD["sessionId"]
+    assert (session._ufrag, session._ice_pwd) == (_CLOUD["iceUfrag"], _CLOUD["icePassword"])
+    assert session._media_key == bytes.fromhex(_CLOUD["aesKey"])
+    assert session._trace_id == _CLOUD["traceId"] and session._user_id == _CLOUD["uid"]
+
+
+@pytest.mark.parametrize("bad", [{}, {"aesKey": "zz"}, {**_CLOUD, "aesKey": "00"}, {**_CLOUD, "sessionId": None}])
+def test_an_unusable_cloud_session_falls_back_to_a_generated_one(bad):
+    session = VideoSession(
+        on_nal=lambda _n: None, host="127.0.0.1", local_key="k" * 16, device_id="dev",
+        device_password="pw", cloud_session=bad,
+    )
+    assert session._session_id.startswith("dev") and session._media_key != bytes.fromhex(_CLOUD["aesKey"])
+
+
+@pytest.mark.asyncio
+async def test_a_refused_stream_open_does_not_fetch_a_cloud_config(video, coordinator):
+    """A fetched config reserves a slot on the robot until used, so fetch only once it will be."""
+    feed = MagicMock()
+    feed.get_rtc = AsyncMock()
+    coordinator.p2p = feed
+
+    async def refuse(*_a, **_k):
+        coordinator.data = VacuumState(video_response=(VIDEO_MGR_STREAM_OPEN, 1, time.monotonic()))
+
+    coordinator.async_send_command.side_effect = refuse
+    with pytest.raises(HomeAssistantError, match="refused"):
+        await video._stream_once()
+    feed.get_rtc.assert_not_awaited()

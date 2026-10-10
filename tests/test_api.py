@@ -1,6 +1,8 @@
 """Unit tests for the API layer (parser and commands)."""
 
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
+import pytest
 
 from custom_components.robovac_mqtt.api.commands import (
     build_command,
@@ -15,6 +17,7 @@ from custom_components.robovac_mqtt.api.commands import (
     build_set_water_level_command,
 )
 from custom_components.robovac_mqtt.api.parser import update_state
+from custom_components.robovac_mqtt.api.tuya_cloud import TuyaCloudClient
 from custom_components.robovac_mqtt.const import DPS_MAP, EUFY_CLEAN_CONTROL
 from custom_components.robovac_mqtt.models import VacuumState
 from custom_components.robovac_mqtt.proto.cloud.error_code_pb2 import ErrorCode
@@ -447,3 +450,17 @@ def test_known_unprocessed_dps_does_not_crash():
     new_state, _ = update_state(state, dps)
     # Should not crash and state should be unchanged (except raw_dps)
     assert new_state.activity == "idle"
+
+
+@pytest.mark.asyncio
+async def test_get_rtc_config_returns_the_cloud_session_reserved_on_the_robot():
+    client = TuyaCloudClient.__new__(TuyaCloudClient)
+    client.request = AsyncMock(
+        return_value={
+            "password": "pw",
+            "p2pConfig": {"ices": [{"urls": "stun:x"}], "tcpRelay": {"a": 1}, "log": {}, "session": {"sessionId": "sid"}},
+        }
+    )
+    config = await client.get_rtc_config("dev")
+    assert config["session"] == {"sessionId": "sid"}
+    assert config["device_password"] == "pw" and config["ice_config"]["token"] == [{"urls": "stun:x"}]

@@ -36,7 +36,9 @@ LINGER_SECONDS = 20.0  # keep streaming this long after the last viewer leaves
 FIRST_FRAME_TIMEOUT = 15.0
 _OPEN_REPLY_TIMEOUT = 5.0
 _STALL_SECONDS = 10.0  # no new frame for this long -> restart the session
-_RETRY_BACKOFF = (2.0, 5.0, 15.0, 30.0, 60.0)  # a refusing robot is not hammered
+# Each attempt fetches a cloud config that reserves a slot on the robot until used,
+# so a refusing robot is retried rarely, not hammered.
+_RETRY_BACKOFF = (5.0, 30.0, 300.0, 600.0)
 _JPEG_START, _JPEG_END = b"\xff\xd8", b"\xff\xd9"
 
 # H.265 NAL units in on stdin, one JPEG per frame out on stdout.
@@ -175,8 +177,10 @@ class RobotVideo:
         feed = coordinator.p2p
         if feed is None:
             raise HomeAssistantError("No local P2P connection to the robot")
-        rtc = await feed.get_rtc()
+        # Open the robot's stream first: if it refuses (it is cleaning, say) no cloud
+        # config has been fetched, so no slot on the robot is reserved for nothing.
         await self._open_robot_stream()
+        rtc = await feed.get_rtc()
 
         ffmpeg = await asyncio.create_subprocess_exec(
             _ffmpeg_binary(self._hass),
@@ -193,6 +197,7 @@ class RobotVideo:
             device_id=feed.device_id,
             device_password=rtc["device_password"],
             ice_config=rtc.get("ice_config"),
+            cloud_session=rtc.get("session"),
             on_nal=lambda nal: None if stdin.is_closing() else stdin.write(nal),
         )
         self.sessions += 1
