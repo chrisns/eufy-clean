@@ -15,10 +15,12 @@ from ..const import (
     DOCK_ACTIVITY_STATES,
     DPS_MAP,
     DPS_ROBOT_TELEMETRY,
+    DPS_UNSETTING_HEIGHT_DETECTION_FIELD,
     EUFY_CLEAN_APP_TRIGGER_MODES,
     EUFY_CLEAN_ERROR_CODES,
     EUFY_CLEAN_NOVEL_CLEAN_SPEED,
     FAN_SUCTION_NAMES,
+    HEIGHT_DETECTION_MODES,
     KNOWN_UNPROCESSED_DPS,
     MOP_WATER_LEVEL_NAMES,
     STATION_TANK_LEVEL_NAMES,
@@ -593,6 +595,9 @@ def _process_other_dps(
                 if settings.HasField("children_lock"):
                     changes["child_lock"] = settings.children_lock.value
                     track_received_field(state, changes, "child_lock")
+                if (mode := _extract_height_detection(value)) is not None:
+                    changes["height_detection"] = mode
+                    track_received_field(state, changes, "height_detection")
                 off_peak = _extract_off_peak_charging(value)
                 if off_peak is not None:
                     _LOGGER.debug("DPS 176 off-peak parsed: %s", off_peak)
@@ -790,6 +795,38 @@ def _map_trigger_source(value: int) -> str:
     5: REMOTE_CTRL
     """
     return TRIGGER_SOURCE_NAMES.get(TriggerSource(value), "unknown")
+
+
+def _extract_height_detection(value: Any) -> str | None:
+    """Pull the height-detection mode out of a DPS 176 payload.
+
+    The S1 Pro reports its settings as fields (104-107) the bundled
+    ``UnisettingResponse`` does not define, so this walks the wire format for the
+    one varint we know: field 107, the sensitivity level.
+    """
+    try:
+        raw = base64.b64decode(value)
+        length, pos = decode_varint(raw, 0)
+        end = min(len(raw), pos + length)
+        while pos < end:
+            key, pos = decode_varint(raw, pos)
+            field, wire = key >> 3, key & 7
+            if wire == 0:
+                number, pos = decode_varint(raw, pos)
+                if field == DPS_UNSETTING_HEIGHT_DETECTION_FIELD:
+                    return HEIGHT_DETECTION_MODES.get(number)
+            elif wire == 2:
+                size, pos = decode_varint(raw, pos)
+                pos += size
+            elif wire == 5:
+                pos += 4
+            elif wire == 1:
+                pos += 8
+            else:
+                return None
+    except (ValueError, TypeError, IndexError):
+        return None
+    return None
 
 
 def _map_clean_speed(value: Any) -> str:

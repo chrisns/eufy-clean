@@ -770,3 +770,20 @@ def test_accessory_minutes_on_tuya_transport_firmware():
     state, _ = update_state(VacuumState(), {DPS_MAP["ACCESSORIES_STATUS"]: encode_message(response)})
     assert state.accessories.main_brush_usage == 379
     assert state.accessories.side_brush_usage == 7
+
+
+def test_height_detection_read_from_s1_pro_settings():
+    """S1 Pro DPS 176 carries the sensitivity as field 107 (1 Safe / 2 Medium / 3 Free)."""
+    medium = "EMIGAggBygYA0gYCCAHYBgI="  # 104 off, 106 on, 107 = 2
+    free = "EMIGAggBygYA0gYCCAHYBgM="
+    state, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: medium})
+    assert changes["height_detection"] == "Medium"
+    state, changes = update_state(state, {DPS_MAP["UNSETTING"]: free})
+    assert state.height_detection == "Free"
+    assert "height_detection" in state.received_fields
+
+
+def test_height_detection_ignored_when_absent_or_unknown():
+    # An X-series style payload with no field 107, and a value outside 1-3.
+    _, changes = update_state(VacuumState(), {DPS_MAP["UNSETTING"]: "A9gGBw=="})
+    assert "height_detection" not in changes

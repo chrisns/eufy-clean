@@ -9,9 +9,11 @@ from ..const import (
     CLEAN_EXTENT_MAP,
     CLEAN_TYPE_MAP,
     DPS_MAP,
+    DPS_UNSETTING_HEIGHT_DETECTION_FIELD,
     EUFY_CLEAN_CLEAN_SPEED,
     EUFY_CLEAN_CONTROL,
     EUFY_CLEAN_NOVEL_CLEAN_SPEED,
+    HEIGHT_DETECTION_MODES,
     MOP_CORNER_MAP,
     MOP_LEVEL_MAP,
     SCALAR_CLEAN_PATTERN_NAMES,
@@ -80,6 +82,16 @@ REMOTE_DIRECTIONS: dict[str, RemoteCtrl.Direction] = {
     "left": RemoteCtrl.LEFT,
     "right": RemoteCtrl.RIGHT,
 }
+
+
+def build_set_height_detection_command(mode: str) -> dict[str, str]:
+    """Set the S1 Pro's height detection sensitivity (DPS 176 field 107)."""
+    for number, name in HEIGHT_DETECTION_MODES.items():
+        if name.lower() == mode.lower():
+            body = encode_varint(DPS_UNSETTING_HEIGHT_DETECTION_FIELD << 3) + encode_varint(number)
+            return {DPS_MAP["UNSETTING"]: base64.b64encode(encode_varint(len(body)) + body).decode()}
+    _LOGGER.warning("Invalid height detection mode '%s' ignored", mode)
+    return {}
 
 
 def build_remote_move_command(direction: str) -> dict[str, str]:
@@ -676,6 +688,8 @@ def build_command(
         )
     if cmd == "set_fan_speed":
         return build_set_clean_speed_command(kwargs.get("fan_speed", ""))
+    if cmd == "set_height_detection":
+        return build_set_height_detection_command(kwargs.get("mode", ""))
     if cmd == "start_remote":
         return _build_mode_ctrl(EUFY_CLEAN_CONTROL.START_RC_CLEAN)
     if cmd == "stop_remote":

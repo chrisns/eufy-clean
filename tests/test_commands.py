@@ -361,3 +361,11 @@ def test_remote_move_commands():
 def test_remote_mode_enter_and_exit():
     assert decode(ModeCtrlRequest, build_command("start_remote")["152"]).method == 5
     assert decode(ModeCtrlRequest, build_command("stop_remote")["152"]).method == 16
+
+
+def test_set_height_detection_matches_the_app_payloads():
+    """Byte-for-byte what was written to a real S1 Pro (field 107, length-prefixed)."""
+    assert build_command("set_height_detection", mode="Safe") == {"176": "A9gGAQ=="}
+    assert build_command("set_height_detection", mode="medium") == {"176": "A9gGAg=="}
+    assert build_command("set_height_detection", mode="FREE") == {"176": "A9gGAw=="}
+    assert build_command("set_height_detection", mode="nope") == {}

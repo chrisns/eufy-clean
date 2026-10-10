@@ -268,4 +268,9 @@ async def test_camera_exposes_rooms_and_obstacles(hass, fake_session):
     attrs = EufyMapCamera(coordinator).extra_state_attributes
     assert attrs["rooms"] == {"0": "Kitchen"}
     assert attrs["obstacles"] == [{"type": "Shoe", "x": -103, "y": 442}]
+    coordinator.p2p.decoder.state.pose = Pose(3, -4, 157)
+    coordinator.p2p.decoder.state.docks = [Pose(1, -29, 0)]
+    attrs = EufyMapCamera(coordinator).extra_state_attributes
+    assert attrs["robot"] == {"x": 3, "y": -4, "theta": 157}
+    assert attrs["dock"] == {"x": 1, "y": -29}
     await coordinator.async_stop_p2p()

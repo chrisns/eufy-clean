@@ -22,6 +22,7 @@ from .const import (
     EUFY_CLEAN_CLEANING_MODES,
     EUFY_CLEAN_NOVEL_CLEAN_SPEED,
     EUFY_CLEAN_WATER_LEVELS,
+    HEIGHT_DETECTION_MODES,
     LEGACY_CLEAN_SPEEDS,
     SCALAR_CLEAN_PATTERN_NAMES,
     SCALAR_SUCTION_LEVELS,
@@ -103,6 +104,7 @@ async def async_setup_entry(
                 WaterLevelSelectEntity(coordinator),
                 MopIntensitySelectEntity(coordinator),
                 CleaningIntensitySelectEntity(coordinator),
+                HeightDetectionSelectEntity(coordinator),
                 DockSelectEntity(
                     coordinator,
                     "wash_frequency_mode",
@@ -756,6 +758,26 @@ class CleaningIntensitySelectEntity(_StateBackedSelectEntity):
     def __init__(self, coordinator: EufyCleanCoordinator) -> None:
         """Initialize cleaning intensity select."""
         super().__init__(coordinator, "cleaning_intensity")
+
+
+class HeightDetectionSelectEntity(_StateBackedSelectEntity):
+    """How readily the robot treats low furniture edges as obstacles (S1 Pro)."""
+
+    supported_api_types = (API_TYPE_NOVEL,)
+
+    _attr_has_entity_name = True
+    _attr_name = "Height Detection"
+    _attr_icon = "mdi:arrow-collapse-vertical"
+    _attr_options = list(HEIGHT_DETECTION_MODES.values())
+    _command_name = "set_height_detection"
+    _command_arg_name = "mode"
+    _state_field = "height_detection"
+    _available_field = "height_detection"
+    _log_label = "Height detection"
+
+    def __init__(self, coordinator: EufyCleanCoordinator) -> None:
+        """Initialize height detection select."""
+        super().__init__(coordinator, "height_detection")
 
 
 _VOICE_OPTIONS = [label for label, _ in VOICE_CATALOG.values()]

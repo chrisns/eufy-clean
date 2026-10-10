@@ -55,6 +55,11 @@ class EufyMapCamera(CoordinatorEntity[EufyCleanCoordinator], Camera):
         if rooms := self.coordinator.data.rooms:
             attrs["rooms"] = {str(r["id"]): r.get("name", "") for r in rooms}
         if self.coordinator.p2p is not None:
+            state = self.coordinator.p2p.state
+            if state.pose is not None:
+                attrs["robot"] = {"x": state.pose.x, "y": state.pose.y, "theta": state.pose.theta}
+            if state.dock is not None:
+                attrs["dock"] = {"x": state.dock.x, "y": state.dock.y}
             # Objects the robot recognised on its last runs, in world centimetres.
             attrs["obstacles"] = [
                 {"type": o.object_type, "x": o.points[0][0], "y": o.points[0][1]}
