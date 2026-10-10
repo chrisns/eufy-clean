@@ -17,7 +17,9 @@ from custom_components.robovac_mqtt.proto.cloud.app_device_info_pb2 import Devic
 from custom_components.robovac_mqtt.proto.cloud.clean_statistics_pb2 import (
     CleanStatistics,
 )
+from custom_components.robovac_mqtt.proto.cloud.consumable_pb2 import ConsumableResponse
 from custom_components.robovac_mqtt.proto.cloud.language_pb2 import LanguageResponse
+from custom_components.robovac_mqtt.proto.cloud.work_status_pb2 import WorkStatus
 from custom_components.robovac_mqtt.utils import encode_message
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -723,3 +725,48 @@ def test_cleaning_stats_user_total():
     assert new_state.total_cleaning_time == 18000
     assert new_state.total_cleaning_count == 42
     assert "cleaning_totals" in new_state.received_fields
+
+
+def test_unenumerated_state_reads_sub_states():
+    """S1 Pro reports state 9 while washing its mop mid-task: not "idle".
+
+    Real payload (fw 7.0.168): mode SELECT_ROOM, state 9, charging DONE,
+    cleaning DOING, go_wash WASHING.
+    """
+    state, changes = update_state(VacuumState(), {DPS_MAP["WORK_STATUS"]: "EAoCCAEQCRoCCAEyADoCEAE="})
+    assert changes["status_code"] == 9
+    assert state.activity == "docked"
+    assert state.task_status == "Washing Mop"
+
+
+def test_state_9_is_docked_for_station_tasks():
+    """After a clean the S1 Pro sits in state 9 (bare, or with field 31) while it
+    empties, washes and dries: it is at the dock, not idle."""
+    state, _ = update_state(VacuumState(), {DPS_MAP["WORK_STATUS"]: "AhAJ"})
+    assert state.activity == "docked"
+
+
+def test_unenumerated_state_cleaning_without_wash():
+    ws = WorkStatus(state=10)
+    ws.cleaning.state = 0
+    state, _ = update_state(VacuumState(), {DPS_MAP["WORK_STATUS"]: encode_message(ws)})
+    assert state.activity == "cleaning"
+
+
+def test_boost_iq_dps_159_parsed_for_tuya_transport_robots():
+    state, _ = update_state(VacuumState(), {DPS_MAP["BOOST_IQ"]: True})
+    assert state.boost_iq is True
+    assert "boost_iq" in state.received_fields
+    # A non-bool on 159 is not BoostIQ and is ignored.
+    state, changes = update_state(VacuumState(), {DPS_MAP["BOOST_IQ"]: "x"})
+    assert "boost_iq" not in changes
+
+
+def test_accessory_minutes_on_tuya_transport_firmware():
+    """S1 Pro firmware puts consumable runtime in minutes (field 22)."""
+    response = ConsumableResponse()
+    response.runtime.rolling_brush.duration_min = 22756
+    response.runtime.side_brush.duration = 7  # MQTT style, hours
+    state, _ = update_state(VacuumState(), {DPS_MAP["ACCESSORIES_STATUS"]: encode_message(response)})
+    assert state.accessories.main_brush_usage == 379
+    assert state.accessories.side_brush_usage == 7

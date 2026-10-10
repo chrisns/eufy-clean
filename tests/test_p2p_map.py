@@ -1,0 +1,258 @@
+"""Tests for the live P2P map feed and its coordinator wiring.
+
+The P2P session itself is replaced by a scripted fake: these tests cover the
+supervision policy (snapshot per session, reconnect on demand, backoff), the
+persistence round-trip, and how decoded updates reach coordinator state.
+"""
+
+# pylint: disable=redefined-outer-name, protected-access
+
+import asyncio
+from dataclasses import replace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from custom_components.robovac_mqtt import p2p_map
+from custom_components.robovac_mqtt.api.p2p.mapdata import (
+    CHANGED_MAP,
+    CHANGED_ROOMS,
+    Obstacle,
+    P2PMap,
+    Pose,
+)
+from custom_components.robovac_mqtt.coordinator import EufyCleanCoordinator
+from custom_components.robovac_mqtt.p2p_map import P2PMapFeed
+
+from .test_p2p import _delimited, _outline_msg, _path_obj, _pose_obj, _rooms_msg
+
+_RTC = {"device_password": "pw", "ice_config": {"token": []}}
+
+
+class _FakeSession:
+    """Plays a list of stream objects into on_object, then ends (or raises)."""
+
+    script: list = []
+    instances: list = []
+
+    def __init__(self, *, on_object, **kwargs):
+        self.on_object = on_object
+        self.kwargs = kwargs
+        self.closed = False
+        _FakeSession.instances.append(self)
+
+    async def run(self):
+        step = _FakeSession.script.pop(0) if _FakeSession.script else []
+        if isinstance(step, Exception):
+            raise step
+        for name, obj in step:
+            self.on_object(name, obj)
+        await asyncio.sleep(0)
+
+    async def close(self):
+        self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def fake_session():
+    _FakeSession.script = []
+    _FakeSession.instances = []
+    with patch.object(p2p_map, "P2PSession", _FakeSession):
+        yield _FakeSession
+
+
+def _feed(hass, *, active=False, changes=None, rtc=None):
+    return P2PMapFeed(
+        hass,
+        host="192.168.1.50",
+        local_key="0123456789abcdef",
+        device_id="dev",
+        rtc_config=AsyncMock(return_value=_RTC if rtc is None else rtc),
+        is_active=lambda: active,
+        on_change=(changes.append if changes is not None else lambda _c: None),
+        name="S1 Pro",
+    )
+
+
+async def _until(predicate, timeout=2.0):
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while not predicate():
+        if loop.time() > end:
+            raise AssertionError("condition not met")
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_feed_applies_objects_and_reports_changes(hass, fake_session):
+    changes: list[set[str]] = []
+    fake_session.script = [
+        [
+            ("map.bin.stream", _delimited(_outline_msg(bytes([2] * 12)))),
+            ("map.bin.stream", _delimited(_rooms_msg((0, "Kitchen")))),
+        ]
+    ]
+    feed = _feed(hass, changes=changes)
+    feed.start()
+    await _until(lambda: len(changes) == 2)
+    assert CHANGED_MAP in changes[0] and changes[1] == {CHANGED_ROOMS}
+    assert feed.state.rooms[0]["name"] == "Kitchen"
+    assert feed.sessions == 1
+    assert fake_session.instances[0].kwargs["device_password"] == "pw"
+    await feed.stop()
+
+
+@pytest.mark.asyncio
+async def test_feed_reconnects_when_poked_and_takes_a_fresh_path_snapshot(hass, fake_session):
+    fake_session.script = [
+        [("cleanPath.bin.stream", _path_obj([(1, 1, 2), (2, 2, 2)]))],
+        [("cleanPath.bin.stream", _path_obj([(9, 9, 2)]))],
+    ]
+    feed = _feed(hass)  # idle: would otherwise wait 15 minutes
+    feed.start()
+    await _until(lambda: feed.sessions == 1 and feed.state.path)
+    feed.poke()
+    await _until(lambda: feed.sessions == 2 and feed.state.path == [(9, 9, 2)])
+    await feed.stop()
+
+
+@pytest.mark.asyncio
+async def test_feed_backs_off_after_failures_and_keeps_going(hass, fake_session):
+    fake_session.script = [OSError("refused"), [("navPath.bin", _pose_obj(1, 2, 3))]]
+    with patch.object(p2p_map, "_ACTIVE_RETRY", 0.01):
+        feed = _feed(hass, active=True)
+        feed.start()
+        await _until(lambda: feed.state.pose == Pose(1, 2, 3))
+    assert feed.failures == 1
+    assert feed.last_error is None  # cleared by the good session
+    await feed.stop()
+
+
+@pytest.mark.asyncio
+async def test_feed_records_missing_credentials(hass, fake_session):
+    feed = _feed(hass, rtc={})
+    feed.start()
+    await _until(lambda: feed.failures >= 1)
+    assert "credentials" in feed.last_error
+    assert not fake_session.instances
+    await feed.stop()
+
+
+def test_feed_dump_restore_roundtrip(hass):
+    feed = _feed(hass)
+    feed.decoder.state = P2PMap(
+        map_id=1,
+        width=4,
+        height=3,
+        origin_x=-10,
+        origin_y=-5,
+        docks=[Pose(1, -29, 157)],
+        outline=bytes(range(12)),
+        rooms=[{"id": 0, "name": "Kitchen", "order": 1, "scene": 0}],
+        obstacles=[Obstacle("Shoe", ((5, 6),), photo_id="p1")],
+        virtual_walls=[((1, 2), (3, 4))],
+        forbidden_zones=[[(0, 0), (1, 0), (1, 1), (0, 1)]],
+        path=[(-277, 1163, 0x12), (3, 58, 4)],
+        pose=Pose(3, 58, 152),
+    )
+    dumped = feed.dump()
+    other = _feed(hass)
+    other.restore(dumped)
+    restored = other.state
+    original = feed.state
+    for attr in (
+        "map_id", "width", "height", "origin_x", "origin_y", "docks", "outline",
+        "rooms", "obstacles", "virtual_walls", "forbidden_zones", "path", "pose",
+    ):
+        assert getattr(restored, attr) == getattr(original, attr), attr
+
+
+def test_feed_restore_ignores_garbage(hass):
+    feed = _feed(hass)
+    feed.restore({"map_id": 1})
+    assert not feed.state.has_map
+
+
+# ---------------------------------------------------------------------------
+# coordinator wiring
+# ---------------------------------------------------------------------------
+
+
+def _local_coordinator(hass) -> EufyCleanCoordinator:
+    login = MagicMock()
+    login.openudid = "udid"
+    login.tuya_client = MagicMock()
+    login.tuya_client.get_rtc_config = AsyncMock(return_value=_RTC)
+    info = {
+        "deviceId": "dev",
+        "deviceModel": "T2080A",
+        "deviceName": "S1 Pro",
+        "connection_type": "local",
+        "local_key": "0123456789abcdef",
+        "local_host": "192.168.1.50",
+    }
+    return EufyCleanCoordinator(hass, login, info)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_takes_rooms_and_map_id_from_p2p(hass, fake_session):
+    coordinator = _local_coordinator(hass)
+    fake_session.script = [
+        [
+            ("map.bin.stream", _delimited(_outline_msg(bytes([2] * 12)))),
+            ("map.bin.stream", _delimited(_rooms_msg((0, "Kitchen"), (1, "")))),
+        ]
+    ]
+    with patch.object(coordinator, "_rerender_map") as rerender:
+        coordinator._start_p2p_feed()
+        await _until(lambda: coordinator.data.rooms)
+        assert coordinator.data.rooms == [
+            {"id": 0, "name": "Kitchen"},
+            {"id": 1, "name": "Room 2"},
+        ]
+        assert coordinator.data.map_id == 1
+        assert {"rooms", "map_id"} <= coordinator.data.received_fields
+        assert coordinator._map_data is not None
+        await _until(lambda: rerender.called, timeout=3)
+    coordinator.async_shutdown_timers()
+    await coordinator.async_stop_p2p()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_skips_p2p_without_tuya_session(hass):
+    coordinator = _local_coordinator(hass)
+    coordinator.eufy_login.tuya_client = None
+    coordinator._start_p2p_feed()
+    assert coordinator.p2p is None
+
+
+@pytest.mark.asyncio
+async def test_coordinator_pokes_feed_on_activity_change(hass, fake_session):
+    coordinator = _local_coordinator(hass)
+    coordinator._start_p2p_feed()
+    coordinator.p2p.poke = MagicMock()
+    with patch(
+        "custom_components.robovac_mqtt.coordinator.update_state",
+        return_value=(replace(coordinator.data, activity="cleaning"), {"activity": "cleaning"}),
+    ):
+        coordinator._handle_mqtt_message(b'{"payload": {"data": {"153": "x"}}}')
+    coordinator.p2p.poke.assert_called_once()
+    await coordinator.async_stop_p2p()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_restores_stored_p2p_map(hass, fake_session):
+    coordinator = _local_coordinator(hass)
+    feed = _feed(hass)
+    feed.decoder.state = P2PMap(
+        map_id=1, width=4, height=3, outline=bytes([2] * 12),
+        rooms=[{"id": 0, "name": "Kitchen", "order": 1, "scene": 0}],
+    )
+    coordinator._restore_p2p = feed.dump()
+    fake_session.script = [OSError("offline")]
+    with patch.object(coordinator, "_rerender_map"):
+        coordinator._start_p2p_feed()
+        assert coordinator.data.rooms == [{"id": 0, "name": "Kitchen"}]
+        assert coordinator._map_data is not None
+    coordinator.async_shutdown_timers()
+    await coordinator.async_stop_p2p()

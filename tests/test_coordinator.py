@@ -1,17 +1,20 @@
 """Unit tests for the EufyCleanCoordinator."""
 
-# pylint: disable=redefined-outer-name
-
+import io
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from PIL import Image
 
+from custom_components.robovac_mqtt.api.map_render import render_map
 from custom_components.robovac_mqtt.api.map_stream import MapData
 from custom_components.robovac_mqtt.coordinator import EufyCleanCoordinator
 from custom_components.robovac_mqtt.models import VacuumState
+
+# pylint: disable=redefined-outer-name
 
 
 @pytest.fixture
@@ -659,3 +662,20 @@ async def test_cloud_poll_backoff_caps_at_max(mock_hass, mock_login):
         await coordinator._async_update_data()
 
     assert coordinator.update_interval <= timedelta(minutes=5)
+
+
+def test_calibration_points_match_the_renderer(mock_hass, mock_login):
+    """World-cm <-> image-pixel pairs follow the renderer's Y-flip and scale."""
+    coordinator = EufyCleanCoordinator(
+        mock_hass, mock_login, {"deviceId": "d", "deviceModel": "T2080A", "deviceName": "S1"}
+    )
+    assert coordinator.calibration_points() is None
+    md = MapData(raw_pixels=b"\xaa" * 50, width=20, height=10, origin_x=-100, origin_y=-50, resolution=5)
+    coordinator._map_data = md
+    coordinator.map_image = render_map(md, max_px=200)
+    assert Image.open(io.BytesIO(coordinator.map_image)).size == (200, 100)
+    points = coordinator.calibration_points()
+    assert points[0] == {"vacuum": {"x": -100, "y": -50}, "map": {"x": 5.0, "y": 95.0}}
+    # +500 cm in x = +100 grid cells; +500 cm in y moves up the image.
+    assert points[1]["map"] == {"x": 1005.0, "y": 95.0}
+    assert points[2]["map"] == {"x": 5.0, "y": -905.0}

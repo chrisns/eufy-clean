@@ -25,7 +25,7 @@ _ATTR_MESSAGE_INTEGRITY = 0x0008
 _ATTR_XOR_MAPPED_ADDRESS = 0x0020
 _ATTR_PRIORITY = 0x0024
 _ATTR_USE_CANDIDATE = 0x0025
-_ATTR_ICE_CONTROLLING = 0x002A
+_ATTR_ICE_CONTROLLING = 0x802A
 _ATTR_FINGERPRINT = 0x8028
 _ATTR_SOFTWARE = 0x8022
 
@@ -46,17 +46,17 @@ def _xor_mapped_address(ip: str, port: int) -> bytes:
     return bytes(body)
 
 
-def build_message(message_type: int, transaction_id: bytes, attributes: list[bytes], integrity_key: bytes | None) -> bytes:
+def build_message(kind: int, tid: bytes, attributes: list[bytes], integrity_key: bytes | None) -> bytes:
     """Build a STUN message, appending MESSAGE-INTEGRITY then FINGERPRINT."""
     body = b"".join(attributes)
     if integrity_key is not None:
-        header = struct.pack(">HH", message_type, len(body) + 24) + _MAGIC + transaction_id
+        header = struct.pack(">HH", kind, len(body) + 24) + _MAGIC + tid
         mac = hmac.new(integrity_key, header + body, hashlib.sha1).digest()
         body += _attribute(_ATTR_MESSAGE_INTEGRITY, mac)
-    header = struct.pack(">HH", message_type, len(body) + 8) + _MAGIC + transaction_id
+    header = struct.pack(">HH", kind, len(body) + 8) + _MAGIC + tid
     fingerprint = (zlib.crc32(header + body) & 0xFFFFFFFF) ^ 0x5354554E
     body += _attribute(_ATTR_FINGERPRINT, struct.pack(">I", fingerprint))
-    return struct.pack(">HH", message_type, len(body)) + _MAGIC + transaction_id + body
+    return struct.pack(">HH", kind, len(body)) + _MAGIC + tid + body
 
 
 def is_stun(datagram: bytes) -> bool:

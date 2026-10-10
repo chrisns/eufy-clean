@@ -5,28 +5,31 @@ reserved[32]``, where ``credential = md5(device_password + "||" + local_key)``.
 The packets that follow it (a hello and the subscription to the map/path streams)
 are fixed for this robot family and carry no secrets, so they are embedded
 verbatim. The device answers each on conversation 0 and then opens conversation 5.
+
+Every other conversation-0 message is ``magic | type | flag | sub | len |
+payload``, all little-endian u32.
 """
 
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 
 _MAGIC = (0x12345678).to_bytes(4, "little")
 _AUTH_TYPE = (0).to_bytes(4, "little")
 _FIELD = 32
 _USERNAME = "admin"
 
-# Fixed conversation-0 packets captured from an S1 Pro (no secrets: a hello naming
-# the peer, then a subscription to map.bin.stream / cleanPath.bin.stream /
-# navPath.bin.stream, then a short follow-up).
+# Fixed conversation-0 packets captured from an S1 Pro (no secrets): a hello that
+# queries the "ipc_sweeper_robot" album, then a subscription that streams
+# map.bin.stream / cleanPath.bin.stream / navPath.bin.stream on conversation 5.
+# The app follows these with a type-4 download-control packet; sending it makes
+# the robot stop mid-file, so it is deliberately left out.
 _HELLO = bytes.fromhex(
     "78563412020000000000000064000c0074000000ffffffff6970635f737765657065725f726f626f740000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 )
 _SUBSCRIBE = bytes.fromhex(
     "78563412030001000000000064000d00d000000005000000000000006970635f737765657065725f726f626f740000000000000000000000000000000000000000000000000000000000000000000000030000006d61702e62696e2e73747265616d00000000000000000000000000000000000000000000000000000000000000000000636c65616e506174682e62696e2e73747265616d000000000000000000000000000000000000000000000000000000006e6176506174682e62696e2e73747265616d000000000000000000000000000000000000000000000000000000000000"
-)
-_FOLLOW_UP = bytes.fromhex(
-    "78563412040000000000000064000d0048000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 )
 
 
@@ -44,4 +47,27 @@ def _auth_packet(credential: str) -> bytes:
 
 def start_packets(device_password: str, local_key: str) -> list[bytes]:
     """Return the ordered conversation-0 packets, ready to wrap as KCP records."""
-    return [_auth_packet(auth_credential(device_password, local_key)), _HELLO, _SUBSCRIBE, _FOLLOW_UP]
+    return [_auth_packet(auth_credential(device_password, local_key)), _HELLO, _SUBSCRIBE]
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPacket:
+    """One decoded conversation-0 message."""
+
+    type: int
+    flag: int
+    sub_command: int
+    payload: bytes
+
+
+def parse(plaintext: bytes) -> ControlPacket | None:
+    """Decode ``magic | type | flag | sub | len | payload``; None without the magic."""
+    if len(plaintext) < 20 or plaintext[:4] != _MAGIC:
+        return None
+    length = int.from_bytes(plaintext[16:20], "little")
+    return ControlPacket(
+        type=int.from_bytes(plaintext[4:8], "little"),
+        flag=int.from_bytes(plaintext[8:12], "little"),
+        sub_command=int.from_bytes(plaintext[12:16], "little"),
+        payload=plaintext[20 : 20 + length],
+    )

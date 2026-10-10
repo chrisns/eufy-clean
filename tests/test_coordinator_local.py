@@ -26,6 +26,8 @@ def mock_login():
     login = MagicMock()
     login.openudid = "test_udid"
     login.checkLogin = AsyncMock()
+    # No Tuya cloud session: the P2P map feed stays off unless a test opts in.
+    login.tuya_client = None
     return login
 
 

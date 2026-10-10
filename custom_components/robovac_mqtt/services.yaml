@@ -2,7 +2,7 @@ room_at_point:
   name: Room at point
   description: >-
     Resolve which mapped room sits under a normalized point on the rendered map
-    image. Returns { room_id, room_name } — room_id 0 means no room there. Used by
+    image. Returns { room_id, room_name } — room_id -1 means no room there (0 is a valid room on some robots). Used by
     the bundled Eufy Clean card for tap-a-room-on-the-map selection.
   target:
     entity:

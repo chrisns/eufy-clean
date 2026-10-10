@@ -21,6 +21,7 @@ from ..const import (
     FAN_SUCTION_NAMES,
     KNOWN_UNPROCESSED_DPS,
     MOP_WATER_LEVEL_NAMES,
+    STATION_TANK_LEVEL_NAMES,
     TRIGGER_SOURCE_NAMES,
     WORK_MODE_NAMES,
     CleaningMode,
@@ -248,6 +249,14 @@ def _process_station_status(
             changes["station_clean_water"] = station.clean_water.value
             track_received_field(state, changes, "station_clean_water")
 
+        # Banded tank levels (S1 Pro). proto3 drops EMPTY (0) on the wire, so a
+        # robot counts as reporting them once either level has been non-empty.
+        present = {field.name for field, _ in station.ListFields()}
+        if present & {"clean_level", "dirty_level"} or "station_tanks" in state.received_fields:
+            changes["station_clean_tank"] = STATION_TANK_LEVEL_NAMES.get(station.clean_level)
+            changes["station_dirty_tank"] = STATION_TANK_LEVEL_NAMES.get(station.dirty_level)
+            track_received_field(state, changes, "station_tanks")
+
         # Auto Empty Config
         if station.HasField("auto_cfg_status"):
             changes["dock_auto_cfg"] = MessageToDict(
@@ -471,6 +480,9 @@ def _process_other_dps(
             elif key == DPS_MAP["CLEAN_SPEED"]:
                 changes["fan_speed"] = _map_clean_speed(value)
                 track_received_field(state, changes, "fan_speed")
+            elif key == DPS_MAP["BOOST_IQ"] and isinstance(value, bool):
+                changes["boost_iq"] = value
+                track_received_field(state, changes, "boost_iq")
 
             elif key == DPS_MAP["ERROR_CODE"]:
                 error_proto = decode(ErrorCode, value)
@@ -500,10 +512,17 @@ def _process_other_dps(
                     if stats.single.clean_area > 0:
                         changes["cleaning_area"] = stats.single.clean_area
                     track_received_field(state, changes, "cleaning_stats")
-                if stats.HasField("user_total"):
-                    changes["total_cleaning_area"] = stats.user_total.clean_area
-                    changes["total_cleaning_time"] = stats.user_total.clean_duration
-                    changes["total_cleaning_count"] = stats.user_total.clean_count
+                # user_total resets per owner; robots that only send the
+                # lifetime total (S1 Pro) fall back to it.
+                totals = (
+                    stats.user_total if stats.HasField("user_total")
+                    else stats.total if stats.HasField("total")
+                    else None
+                )
+                if totals is not None:
+                    changes["total_cleaning_area"] = totals.clean_area
+                    changes["total_cleaning_time"] = totals.clean_duration
+                    changes["total_cleaning_count"] = totals.clean_count
                     track_received_field(state, changes, "cleaning_totals")
 
             elif key == DPS_MAP["SCENE_INFO"]:
@@ -744,8 +763,18 @@ def _map_work_status(status: WorkStatus) -> str:
         return "returning"
     if s == 8:  # Active clean (alternate / cruising)
         return "cleaning"
+    if s == 9:  # Outside the enum: S1 Pro at its station (wash / empty / dry)
+        return "docked"
     if s == 15:  # Paused
         return "paused"
+    # Any other state outside the enum: read the sub-states rather than
+    # guessing "idle".
+    if status.HasField("go_wash"):
+        return "docked" if status.go_wash.mode in (1, 2) else "cleaning"
+    if status.HasField("go_home"):
+        return "returning"
+    if status.HasField("cleaning"):
+        return "paused" if status.cleaning.state == 1 else "cleaning"
 
     return "idle"
 
@@ -922,24 +951,25 @@ def _parse_accessories(current_state: AccessoryState, value: Any) -> AccessorySt
         runtime = response.runtime
         changes: dict[str, Any] = {}
 
-        if runtime.HasField("filter_mesh"):
-            changes["filter_usage"] = runtime.filter_mesh.duration
-        if runtime.HasField("rolling_brush"):
-            changes["main_brush_usage"] = runtime.rolling_brush.duration
-        if runtime.HasField("side_brush"):
-            changes["side_brush_usage"] = runtime.side_brush.duration
-        if runtime.HasField("sensor"):
-            changes["sensor_usage"] = runtime.sensor.duration
-        if runtime.HasField("scrape"):
-            changes["scrape_usage"] = runtime.scrape.duration
-        if runtime.HasField("mop"):
-            changes["mop_usage"] = runtime.mop.duration
-        if runtime.HasField("dustbag"):
-            changes["dustbag_usage"] = runtime.dustbag.duration
-        if runtime.HasField("dirty_watertank"):
-            changes["dirty_watertank_usage"] = runtime.dirty_watertank.duration
-        if runtime.HasField("dirty_waterfilter"):
-            changes["dirty_waterfilter_usage"] = runtime.dirty_waterfilter.duration
+        def hours(field: str) -> int:
+            # MQTT firmware reports whole hours; Tuya-transport firmware (S1 Pro)
+            # reports minutes in a different field.
+            duration = getattr(runtime, field)
+            return round(duration.duration_min / 60) if duration.duration_min else duration.duration
+
+        for field, usage in (
+            ("filter_mesh", "filter_usage"),
+            ("rolling_brush", "main_brush_usage"),
+            ("side_brush", "side_brush_usage"),
+            ("sensor", "sensor_usage"),
+            ("scrape", "scrape_usage"),
+            ("mop", "mop_usage"),
+            ("dustbag", "dustbag_usage"),
+            ("dirty_watertank", "dirty_watertank_usage"),
+            ("dirty_waterfilter", "dirty_waterfilter_usage"),
+        ):
+            if runtime.HasField(field):
+                changes[usage] = hours(field)
 
         return replace(current_state, **changes)
 

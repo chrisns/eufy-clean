@@ -198,7 +198,7 @@ class RoboVacMQTTEntity(CoordinatorEntity[EufyCleanCoordinator], StateVacuumEnti
 
         # Scalar (G50) suction is Quiet/Standard/Turbo/Max; BoostIQ is a separate
         # switch (DPS 118), not a 5th fan speed.
-        if coordinator.api_type == "scalar":
+        if coordinator.api_type == "scalar" or coordinator.tuya_transport:
             self._attr_fan_speed_list: list[str] = list(SCALAR_SUCTION_LEVELS)
         elif coordinator.api_type == "legacy":
             self._attr_fan_speed_list = list(LEGACY_CLEAN_SPEEDS)
@@ -474,9 +474,12 @@ class RoboVacMQTTEntity(CoordinatorEntity[EufyCleanCoordinator], StateVacuumEnti
 
         Backs the bundled card's tap-a-room-on-the-map selection. ``x``/``y`` are
         fractions of the rendered map image (top-left origin). Returns
-        ``{"room_id": int, "room_name": str}``; ``room_id`` 0 means "no room there".
+        ``{"room_id": int, "room_name": str}``; ``room_id`` -1 means "no room
+        there" (0 is a valid room id on some robots).
         """
         room_id, room_name = self.coordinator.room_id_at_normalized(x, y)
+        if room_id is None:
+            return {"room_id": -1, "room_name": ""}
         return {"room_id": room_id, "room_name": room_name or ""}
 
     async def async_map_load(self, cloud_mapid: int, seq: int = 1) -> None:

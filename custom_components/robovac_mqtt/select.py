@@ -107,14 +107,10 @@ async def async_setup_entry(
                     coordinator,
                     "wash_frequency_mode",
                     "Wash Frequency Mode",
-                    ["ByRoom", "ByTime"],
-                    lambda cfg: (
-                        "ByRoom"
-                        if cfg.get("wash", {})
-                        .get("wash_freq", {})
-                        .get("mode", "ByPartition")
-                        == "ByPartition"
-                        else "ByTime"
+                    list(_WASH_FREQ_MODES),
+                    lambda cfg: _WASH_FREQ_MODES_BY_PROTO.get(
+                        cfg.get("wash", {}).get("wash_freq", {}).get("mode", "ByPartition"),
+                        "ByRoom",
                     ),
                     _set_wash_freq_mode,
                     icon="mdi:calendar-sync",
@@ -171,13 +167,18 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
+# Wash-frequency option -> WashCfg.BackwashFreq.Mode. The S1 Pro washes by area.
+_WASH_FREQ_MODES = {"ByRoom": "ByPartition", "ByTime": "ByTime", "ByArea": "ByArea"}
+_WASH_FREQ_MODES_BY_PROTO = {proto: option for option, proto in _WASH_FREQ_MODES.items()}
+
+
 def _set_wash_freq_mode(cfg: dict[str, Any], val: str) -> None:
     """Helper to set wash freq mode."""
     if "wash" not in cfg:
         cfg["wash"] = {}
     if "wash_freq" not in cfg["wash"]:
         cfg["wash"]["wash_freq"] = {}
-    cfg["wash"]["wash_freq"]["mode"] = "ByPartition" if val == "ByRoom" else "ByTime"
+    cfg["wash"]["wash_freq"]["mode"] = _WASH_FREQ_MODES[val]
 
 
 def _get_dry_duration(cfg: dict[str, Any]) -> str:
@@ -611,10 +612,11 @@ class SuctionLevelSelectEntity(_StateBackedSelectEntity):
     def __init__(self, coordinator: EufyCleanCoordinator) -> None:
         """Initialize suction level select."""
         super().__init__(coordinator, "suction_level")
-        # scalar-protocol devices expose BoostIQ as a separate switch (DPS 118),
-        # so their suction list is the four levels without Boost_IQ. legacy
-        # (Tuya Cloud) devices use the plain Tuya speed strings.
-        if coordinator.api_type == "scalar":
+        # scalar-protocol devices (DPS 118) and Tuya-transport protobuf robots
+        # (DPS 159) expose BoostIQ as a separate switch, so their suction list is
+        # the four levels without Boost_IQ. legacy (Tuya Cloud) devices use the
+        # plain Tuya speed strings.
+        if coordinator.api_type == "scalar" or coordinator.tuya_transport:
             self._attr_options = SCALAR_SUCTION_LEVELS
         elif coordinator.api_type == "legacy":
             self._attr_options = list(LEGACY_CLEAN_SPEEDS)

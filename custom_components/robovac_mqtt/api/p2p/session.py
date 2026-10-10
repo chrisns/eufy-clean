@@ -1,10 +1,16 @@
-"""Drive one P2P session on the LAN and return the room list.
+"""A long-lived P2P session to the robot on the LAN.
 
-Ties the pieces together: signaling over TCP 6668, ICE and the tagged KCP media
-over a UDP pair, the conversation-0 control burst, then reassembly of the
-conversation-5 map stream into the rooms. Everything is generated fresh (our own
-AES media key); nothing from a prior capture is reused except the fixed,
-secret-free control packets in :mod:`control`.
+Signaling rides the local Tuya socket (TCP 6668, command type 32): our SDP offer
+names the AES media key, then host candidates are exchanged. The media is KCP
+over a UDP pair once ICE connectivity checks pass both ways. Conversation 0
+carries the auth + subscribe burst, conversation 5 the named file streams
+(``map.bin.stream``, ``cleanPath.bin.stream``, ``navPath.bin.stream``).
+
+:class:`P2PSession` keeps the channel alive (ICE consent refresh, Tuya
+heartbeats, KCP acks and retransmits) and hands every reassembled stream object
+to a callback until it is closed or the channel stalls. Supervision (reconnect,
+backoff) is the caller's job: :meth:`P2PSession.run` returns or raises when the
+session ends.
 """
 
 from __future__ import annotations
@@ -16,16 +22,28 @@ import re
 import secrets
 import socket
 import time
+from collections.abc import Callable
+from typing import Any
 
 from . import control, kcp, stun
-from .framing import CMD_DP_QUERY, CMD_RTC, decode_frames, encode_frame
-from .mapdata import extract_rooms
+from .framing import CMD_DP_QUERY, CMD_HEARTBEAT, CMD_RTC, decode_frames, encode_frame
+from .streams import StreamReassembler
 
 _LOGGER = logging.getLogger(__name__)
 
 ROBOT_PORT = 6668
 _ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _DEFAULT_LOG = {"api": "thing.m.rtc.log", "interval": 60, "size": 1024, "level": 2, "topic": "/av/moto/log"}
+
+_CONNECT_TIMEOUT = 20.0  # offer -> first complete stream object
+_TICK = 0.1  # KCP retransmit cadence
+_CONSENT_INTERVAL = 2.5  # ICE consent refresh toward the device
+_HEARTBEAT_INTERVAL = 10.0  # Tuya socket keep-alive
+_STALL_TIMEOUT = 45.0  # nothing from the device for this long -> session is dead
+
+
+class P2PError(Exception):
+    """The P2P session could not be opened or has died."""
 
 
 def _random(length: int) -> str:
@@ -56,172 +74,278 @@ def _build_offer_sdp(session_id: str, ufrag: str, password: str, aes_key_hex: st
     )
 
 
+def local_ip_towards(host: str) -> str:
+    """Return the local interface address that routes to ``host``."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.connect((host, ROBOT_PORT))
+        return probe.getsockname()[0]
+
+
 class _UdpProtocol(asyncio.DatagramProtocol):
-    def __init__(self, queue: asyncio.Queue) -> None:
-        self._queue = queue
+    def __init__(self, on_datagram: Callable[[bytes, tuple[str, int]], None]) -> None:
+        self._on_datagram = on_datagram
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
-        self._queue.put_nowait(data)
+        self._on_datagram(data, addr)
 
 
-async def fetch_snapshot(
-    host: str,
-    local_key: str,
-    device_id: str,
-    user_id: str,
-    device_password: str,
-    *,
-    ice_config: dict | None = None,
-    host_ip: str | None = None,
-    timeout: float = 20.0,
-    grace: float = 1.5,
-) -> bytes:
-    """Open a P2P session to ``host`` and return the conversation-5 byte stream.
+class P2PSession:
+    """One P2P session; :meth:`run` blocks until it ends."""
 
-    ``user_id`` is the account identity the offer is sent as. ``device_password``
-    is the RTC-config password used to derive the conversation-0 credential.
-    ``ice_config`` supplies the offer's ``token`` / ``tcp_token`` / ``log`` from
-    the RTC config; without its ICE servers the device answers but never gathers
-    its host candidate. The device pushes the whole map in one burst; we keep
-    collecting for ``grace`` seconds after the first map segment, then return the
-    reassembled stream. Raises :class:`TimeoutError` if no map arrives.
-    """
-    key = local_key.encode()
-    media_key = os.urandom(16)
-    media_key_hex = media_key.hex()
-    ufrag, password = _random(4), _random(24)
-    session_id = f"{device_id}{int(time.time())}{_random(8)}"
-    trace_id = f"ipc_p2p_ios_{device_id}_{int(time.time())}000"
-    cfg = ice_config or {}
+    def __init__(
+        self,
+        *,
+        host: str,
+        local_key: str,
+        device_id: str,
+        device_password: str,
+        on_object: Callable[[str, bytes], None],
+        ice_config: dict[str, Any] | None = None,
+        user_id: str = "homeassistant",
+        host_ip: str | None = None,
+    ) -> None:
+        self._host = host
+        self._local_key = local_key
+        self._key = local_key.encode()
+        self._device_id = device_id
+        self._device_password = device_password
+        self._ice = ice_config or {}
+        self._user_id = user_id
+        self._on_object = on_object
+        self._host_ip = host_ip
 
-    loop = asyncio.get_running_loop()
-    udp_queue: asyncio.Queue = asyncio.Queue()
-    if host_ip is None:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect((host, ROBOT_PORT))
-            host_ip = probe.getsockname()[0]
-    transport, _ = await loop.create_datagram_endpoint(lambda: _UdpProtocol(udp_queue), local_addr=(host_ip, 0))
-    our_udp_port = transport.get_extra_info("sockname")[1]
+        self._media_key = os.urandom(16)
+        self._ufrag, self._ice_pwd = _random(4), _random(24)
+        self._session_id = f"{device_id}{int(time.time())}{_random(8)}"
+        self._trace_id = f"ipc_p2p_ios_{device_id}_{int(time.time())}000"
 
-    reader, writer = await asyncio.open_connection(host, ROBOT_PORT)
-    state: dict = {"robot_ufrag": None, "robot_pwd": None, "robot_addr": None, "ice_up": False, "conv0_sent": False}
-    conv5: dict[int, bytes] = {}
-    receive_next = {kcp.CONV_CONTROL: 0, kcp.CONV_MAP: 0}
+        self._robot_ufrag: str | None = None
+        self._robot_pwd: bytes | None = None
+        self._robot_addr: tuple[str, int] | None = None
+        self._ice_up = False
+        self._udp: asyncio.DatagramTransport | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._tcp_sequence = 1
+        self._last_rx = time.monotonic()
+        self._first_object = asyncio.Event()
+        self._closed = asyncio.Event()
+        self._failure: BaseException | None = None
+        self._reassembler = StreamReassembler()
+        self._conversations: dict[int, kcp.KcpConversation] = {}
+        self.bytes_received = 0
 
-    def send_udp(datagram: bytes) -> None:
-        if state["robot_addr"]:
-            transport.sendto(datagram, state["robot_addr"])
+    @property
+    def connected(self) -> bool:
+        return self._first_object.is_set() and not self._closed.is_set()
 
-    def send_conv0() -> None:
-        if state["conv0_sent"]:
+    async def run(self) -> None:
+        """Open the channel and pump it until :meth:`close` or a failure."""
+        loop = asyncio.get_running_loop()
+        tasks: list[asyncio.Future] = []
+        try:
+            # The host may be a DNS name; ICE candidates carry IPv4 addresses.
+            infos = await loop.getaddrinfo(self._host, ROBOT_PORT, family=socket.AF_INET)
+            self._host = infos[0][4][0]
+            if self._host_ip:
+                host_ip = self._host_ip
+            else:
+                host_ip = await loop.run_in_executor(None, local_ip_towards, self._host)
+            self._udp, _ = await loop.create_datagram_endpoint(
+                lambda: _UdpProtocol(self._on_datagram), local_addr=(host_ip, 0)
+            )
+            udp_port = self._udp.get_extra_info("sockname")[1]
+            self._conversations = {
+                kcp.CONV_CONTROL: kcp.KcpConversation(
+                    kcp.CONV_CONTROL, self._media_key, self._send_udp, self._on_control_record
+                ),
+                kcp.CONV_MAP: kcp.KcpConversation(
+                    kcp.CONV_MAP, self._media_key, self._send_udp, self._on_map_record
+                ),
+            }
+            reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(self._host, ROBOT_PORT), 10
+            )
+            tasks = [
+                asyncio.ensure_future(self._signaling(reader, host_ip, udp_port)),
+                asyncio.ensure_future(self._housekeeping()),
+            ]
+            opened = asyncio.ensure_future(self._first_object.wait())
+            ended = asyncio.ensure_future(self._closed.wait())
+            done, _ = await asyncio.wait(
+                {opened, ended}, timeout=_CONNECT_TIMEOUT, return_when=asyncio.FIRST_COMPLETED
+            )
+            opened.cancel()
+            ended.cancel()
+            if not done:
+                raise P2PError(
+                    "no map stream from the robot"
+                    + ("" if self._ice_up else " (ICE never connected)")
+                )
+            if self._first_object.is_set():
+                _LOGGER.debug("p2p: map stream flowing from %s", self._host)
+                await self._closed.wait()
+            if self._failure is not None:
+                raise P2PError(str(self._failure)) from self._failure
+        finally:
+            self._closed.set()
+            for task in tasks:
+                task.cancel()
+            self._shutdown()
+
+    async def close(self) -> None:
+        self._closed.set()
+
+    def _fail(self, err: BaseException) -> None:
+        if not self._closed.is_set():
+            self._failure = err
+            self._closed.set()
+
+    def _shutdown(self) -> None:
+        if self._udp is not None:
+            self._udp.close()
+            self._udp = None
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+
+    def _send_udp(self, datagram: bytes) -> None:
+        if self._udp is not None and self._robot_addr is not None:
+            self._udp.sendto(datagram, self._robot_addr)
+
+    def _send_tcp(self, command: int, payload: dict[str, Any]) -> None:
+        if self._writer is None:
             return
-        state["conv0_sent"] = True
-        for sequence, packet in enumerate(control.start_packets(device_password, local_key)):
-            send_udp(kcp.build_push(media_key, kcp.CONV_CONTROL, sequence, packet))
+        self._writer.write(encode_frame(self._key, command, payload, self._tcp_sequence))
+        self._tcp_sequence += 1
 
-    async def signaling() -> None:
-        sequence = 1
-        writer.write(encode_frame(key, CMD_DP_QUERY, {"gwId": device_id, "devId": device_id}, sequence))
-        sequence += 1
-        offer = {
-            "msg": {
-                "sdp": _build_offer_sdp(session_id, ufrag, password, media_key_hex, user_id),
-                "preconnect": True,
-                "token": cfg.get("token", []),
-                "tcp_token": cfg.get("tcp_token", {}),
-                "log": cfg.get("log", _DEFAULT_LOG),
-            },
-            "header": {
-                "from": user_id, "sessionid": session_id, "is_pre": 0, "p2p_skill": 67,
-                "path": "lan", "security_level": 3, "type": "offer", "to": device_id,
-                "moto_id": "", "trace_id": trace_id,
-            },
+    def _header(self, kind: str, **extra: Any) -> dict[str, Any]:
+        return {
+            "from": self._user_id, "to": self._device_id, "sessionid": self._session_id,
+            "path": "lan", "type": kind, "trace_id": self._trace_id, **extra,
         }
-        writer.write(encode_frame(key, CMD_RTC, offer, sequence))
-        sequence += 1
-        candidate = {
-            "msg": {"candidate": f"a=candidate:{secrets.randbelow(2_000_000_000)} 1 UDP 2130706431 {host_ip} {our_udp_port} typ host\r\n"},
-            "header": {"from": user_id, "sessionid": session_id, "path": "lan", "sub_dev_id": "", "type": "candidate", "to": device_id, "trace_id": trace_id},
-        }
-        await writer.drain()
-        await asyncio.sleep(0.4)
-        writer.write(encode_frame(key, CMD_RTC, candidate, sequence))
-        await writer.drain()
-        _LOGGER.debug("p2p: offer and candidate sent to %s", host)
 
-        buffer = b""
-        while True:
-            chunk = await reader.read(65536)
-            if not chunk:
-                return
-            buffer += chunk
-            frames, buffer = decode_frames(key, buffer)
-            for command, payload in frames:
-                if command != CMD_RTC or not isinstance(payload, dict):
-                    continue
-                header, msg = payload.get("header", {}), payload.get("msg", {})
-                if header.get("type") == "answer":
-                    sdp = msg.get("sdp", "")
-                    state["robot_ufrag"] = (re.search(r"ice-ufrag:(\S+)", sdp) or [None, None])[1]
-                    pwd = re.search(r"ice-pwd:(\S+)", sdp)
-                    state["robot_pwd"] = pwd.group(1).encode() if pwd else None
-                elif header.get("type") == "candidate":
-                    match = re.search(r"(\d+\.\d+\.\d+\.\d+) (\d+) typ host", msg.get("candidate", ""))
-                    if match and match.group(1) == host and state["robot_pwd"]:
-                        state["robot_addr"] = (match.group(1), int(match.group(2)))
-                        send_udp(stun.binding_request(ufrag, state["robot_ufrag"], state["robot_pwd"], False))
+    async def _signaling(self, reader: asyncio.StreamReader, host_ip: str, udp_port: int) -> None:
+        try:
+            assert self._writer is not None
+            self._send_tcp(CMD_DP_QUERY, {"gwId": self._device_id, "devId": self._device_id})
+            sdp = _build_offer_sdp(
+                self._session_id, self._ufrag, self._ice_pwd, self._media_key.hex(), self._user_id
+            )
+            self._send_tcp(CMD_RTC, {
+                "msg": {
+                    "sdp": sdp, "preconnect": True,
+                    "token": self._ice.get("token", []),
+                    "tcp_token": self._ice.get("tcp_token", {}),
+                    "log": self._ice.get("log") or _DEFAULT_LOG,
+                },
+                "header": self._header("offer", is_pre=0, p2p_skill=67, security_level=3, moto_id=""),
+            })
+            await self._writer.drain()
+            await asyncio.sleep(0.4)
+            foundation = secrets.randbelow(2_000_000_000)
+            self._send_tcp(CMD_RTC, {
+                "msg": {"candidate": f"a=candidate:{foundation} 1 UDP 2130706431 {host_ip} {udp_port} typ host\r\n"},
+                "header": self._header("candidate", sub_dev_id=""),
+            })
+            await self._writer.drain()
 
-    def assembled() -> bytes:
-        return b"".join(conv5[sn] for sn in sorted(conv5))
+            buffer = b""
+            while not self._closed.is_set():
+                chunk = await reader.read(65536)
+                if not chunk:
+                    raise P2PError("robot closed the signaling socket")
+                buffer += chunk
+                frames, buffer = decode_frames(self._key, buffer)
+                for command, payload in frames:
+                    if command == CMD_RTC and isinstance(payload, dict):
+                        self._on_signal(payload)
+        except Exception as err:  # noqa: BLE001 - any signaling failure ends the session
+            self._fail(err)
 
-    async def media() -> bytes:
-        deadline: float | None = None
-        while True:
-            wait = None if deadline is None else max(0.0, deadline - loop.time())
+    def _on_signal(self, payload: dict[str, Any]) -> None:
+        header, msg = payload.get("header", {}), payload.get("msg", {})
+        kind = header.get("type")
+        if kind == "answer":
+            sdp = msg.get("sdp", "")
+            if ufrag := re.search(r"ice-ufrag:(\S+)", sdp):
+                self._robot_ufrag = ufrag.group(1)
+            if pwd := re.search(r"ice-pwd:(\S+)", sdp):
+                self._robot_pwd = pwd.group(1).encode()
+        elif kind == "candidate":
+            match = re.search(r"(\d+\.\d+\.\d+\.\d+) (\d+) typ host", msg.get("candidate", ""))
+            if match and match.group(1) == self._host and self._robot_pwd and self._robot_ufrag:
+                self._robot_addr = (match.group(1), int(match.group(2)))
+                self._send_consent(nominate=False)
+        elif kind == "disconnect":
+            _LOGGER.debug("p2p: robot disconnect: %s", msg)
+            self._fail(P2PError(f"robot sent disconnect: {msg}"))
+
+    def _on_datagram(self, datagram: bytes, addr: tuple[str, int]) -> None:
+        if self._robot_addr is None or addr != self._robot_addr:
+            return
+        self._last_rx = time.monotonic()
+        if stun.is_stun(datagram):
+            _LOGGER.debug("p2p: stun %#06x from robot: %s", stun.message_type(datagram), datagram[20:].hex())
+            if stun.message_type(datagram) == stun.BIND_REQUEST:
+                self._send_udp(stun.binding_success(datagram, addr[0], addr[1], self._ice_pwd.encode()))
+                if not self._ice_up:
+                    self._ice_up = True
+                    _LOGGER.debug("p2p: ICE connected to %s:%s", *addr)
+                    self._send_consent(nominate=True)
+                    asyncio.get_running_loop().call_later(0.3, self._send_control_burst)
+            return
+        segments = kcp.parse_datagram(datagram)
+        if not segments:
+            _LOGGER.debug("p2p: unrecognised datagram (%d bytes) %s", len(datagram), datagram[:48].hex())
+        for segment in segments:
+            conversation = self._conversations.get(segment.conversation)
+            if conversation is not None:
+                conversation.input(segment)
+
+    def _send_consent(self, nominate: bool) -> None:
+        if self._robot_ufrag and self._robot_pwd:
+            self._send_udp(stun.binding_request(self._ufrag, self._robot_ufrag, self._robot_pwd, nominate))
+
+    def _send_control_burst(self) -> None:
+        control_conv = self._conversations[kcp.CONV_CONTROL]
+        for packet in control.start_packets(self._device_password, self._local_key):
+            control_conv.send(packet)
+
+    @staticmethod
+    def _on_control_record(plaintext: bytes) -> None:
+        packet = control.parse(plaintext)
+        if packet is None:
+            _LOGGER.debug("p2p: control record (%d bytes) %s", len(plaintext), plaintext[:64].hex())
+            return
+        _LOGGER.debug(
+            "p2p: control type=%#x flag=%s sub=%#x payload=%s",
+            packet.type, packet.flag, packet.sub_command, packet.payload.hex(),
+        )
+
+    def _on_map_record(self, plaintext: bytes) -> None:
+        self.bytes_received += len(plaintext)
+        for name, obj in self._reassembler.feed(plaintext):
+            self._first_object.set()
             try:
-                datagram = await asyncio.wait_for(udp_queue.get(), wait)
-            except asyncio.TimeoutError:
-                return assembled()  # grace elapsed after the map burst
-            if stun.is_stun(datagram):
-                if stun.message_type(datagram) == stun.BIND_REQUEST and state["robot_addr"]:
-                    send_udp(stun.binding_success(datagram, state["robot_addr"][0], state["robot_addr"][1], password.encode()))
-                    if not state["ice_up"]:
-                        state["ice_up"] = True
-                        _LOGGER.debug("p2p: ICE connected, opening control channel")
-                        send_udp(stun.binding_request(ufrag, state["robot_ufrag"], state["robot_pwd"], True))
-                        loop.call_later(0.3, send_conv0)
-                continue
-            for segment in kcp.parse_datagram(datagram):
-                if segment.command != kcp.CMD_PUSH:
-                    continue
-                send_udp(kcp.build_ack(segment.conversation, segment.sequence, receive_next[segment.conversation]))
-                if segment.conversation != kcp.CONV_MAP:
-                    continue
-                conv5[segment.sequence] = kcp.decrypt_record(media_key, segment.data)
-                while receive_next[kcp.CONV_MAP] in conv5:
-                    receive_next[kcp.CONV_MAP] += 1
-                if deadline is None:
-                    deadline = loop.time() + grace
+                self._on_object(name, obj)
+            except Exception:  # noqa: BLE001 - a consumer bug must not kill the channel
+                _LOGGER.exception("p2p: stream consumer failed on %s", name)
 
-    async def signaling_guard() -> None:
+    async def _housekeeping(self) -> None:
+        next_consent = next_heartbeat = time.monotonic()
         try:
-            await signaling()
-        except Exception:  # noqa: BLE001 - surface signaling failures without killing the media wait
-            _LOGGER.exception("p2p: signaling failed")
-
-    signaling_task = asyncio.ensure_future(signaling_guard())
-    try:
-        return await asyncio.wait_for(media(), timeout)
-    finally:
-        signaling_task.cancel()
-        transport.close()
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:  # noqa: BLE001 - closing a half-open socket may raise
-            pass
-
-
-async def fetch_rooms(*args, **kwargs) -> list[dict]:
-    """Open a P2P session and return ``[{"id", "name"}, ...]`` (empty if none)."""
-    return extract_rooms(await fetch_snapshot(*args, **kwargs)) or []
+            while not self._closed.is_set():
+                await asyncio.sleep(_TICK)
+                now = time.monotonic()
+                for conversation in self._conversations.values():
+                    conversation.tick()
+                if self._ice_up and now >= next_consent:
+                    self._send_consent(nominate=True)
+                    next_consent = now + _CONSENT_INTERVAL
+                if now >= next_heartbeat:
+                    self._send_tcp(CMD_HEARTBEAT, {"gwId": "", "devId": ""})
+                    next_heartbeat = now + _HEARTBEAT_INTERVAL
+                if self._first_object.is_set() and now - self._last_rx > _STALL_TIMEOUT:
+                    raise P2PError(f"no traffic from the robot for {_STALL_TIMEOUT:.0f}s")
+        except Exception as err:  # noqa: BLE001 - housekeeping failure ends the session
+            self._fail(err)

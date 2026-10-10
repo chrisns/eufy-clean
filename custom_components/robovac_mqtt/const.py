@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Final
 
 from .proto.cloud.clean_param_pb2 import CleanExtent, CleanType, MopMode
+from .proto.cloud.station_pb2 import StationResponse
 
 DOMAIN: Final = "robovac_mqtt"
 VACS: Final = "vacs"
@@ -550,6 +551,7 @@ DPS_MAP = {
     "ACCESSORIES_STATUS": "168",
     "GO_HOME": "173",
     "CLEAN_SPEED": "158",
+    "BOOST_IQ": "159",  # Tuya-transport robots (S1 Pro): BoostIQ on/off
     "FIND_ROBOT": "160",
     "BATTERY_LEVEL": "163",
     "STATION_STATUS": "173",
@@ -583,7 +585,6 @@ KNOWN_UNPROCESSED_DPS: frozenset[str] = frozenset(
         # Unknown DPS keys observed in the wild:
         "150",  # Unknown, value: None
         "151",  # Unknown, value: True
-        "159",  # Unknown, value: True
         "171",  # Unknown, value: None
         "174",  # Unknown, value: None
         "175",  # Unknown, value: None
@@ -701,6 +702,31 @@ ACCESSORY_MAX_LIFE = {
     "mop_usage": 180,
 }
 
+# Per-model overrides, from the Eufy app's own accessory table
+# (assets/accessory/<model>_accessory_json.json, ``count_time`` in hours).
+# Keyed by model prefix so regional variants (T2080A) share an entry.
+ACCESSORY_MAX_LIFE_BY_MODEL: dict[str, dict[str, int]] = {
+    # S1 Pro: roller mop, filter cleaned every 60 h, sensors every 360 h, no
+    # cleaning tray (0 = the model has no such part).
+    "T2080": {
+        "scrape_usage": 0,
+        "filter_usage": 60,
+        "main_brush_usage": 180,
+        "side_brush_usage": 180,
+        "sensor_usage": 360,
+        "mop_usage": 60,
+    },
+}
+
+
+def accessory_max_life(model: str) -> dict[str, int]:
+    """Return the accessory life table (hours) for a device model."""
+    for prefix, table in ACCESSORY_MAX_LIFE_BY_MODEL.items():
+        if model.startswith(prefix):
+            return {**ACCESSORY_MAX_LIFE, **table}
+    return ACCESSORY_MAX_LIFE
+
+
 # Dock statuses that indicate active dock operations
 # Used to determine when to reset to Idle
 DOCK_ACTIVITY_STATES = (
@@ -801,4 +827,15 @@ TUYA_API_ET_VERSION = "0.0.1"
 TUYA_REGIONS = {
     "EU": "https://a1.tuyaeu.com/api.json",
     "US": "https://a1.tuyaus.com/api.json",
+}
+
+
+# Station tank level (StationResponse.WaterLevel) -> display name. Robots that
+# report a percentage use StationResponse.clean_water instead.
+STATION_TANK_LEVEL_NAMES: Final[dict[int, str]] = {
+    StationResponse.EMPTY: "Empty",
+    StationResponse.VERY_LOW: "Very low",
+    StationResponse.LOW: "Low",
+    StationResponse.MEDIUM: "Medium",
+    StationResponse.HIGH: "High",
 }

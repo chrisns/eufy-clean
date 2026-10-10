@@ -330,3 +330,17 @@ def test_off_peak_command_dispatch():
         end_minute=30,
     )
     assert DPS_MAP["UNSETTING"] in result
+
+
+def test_tuya_transport_suction_is_the_level_name():
+    """Over Tuya (S1 Pro) DPS 158 is an enum string, not the MQTT index."""
+    assert build_command("set_fan_speed", tuya_transport=True, fan_speed="quiet") == {"158": "Quiet"}
+    assert build_command("set_fan_speed", tuya_transport=True, fan_speed="Max") == {"158": "Max"}
+    assert build_command("set_fan_speed", tuya_transport=True, fan_speed="Boost_IQ") == {"159": True}
+    assert build_command("set_fan_speed", tuya_transport=True, fan_speed="nope") == {}
+    # MQTT robots keep the index.
+    assert build_command("set_fan_speed", fan_speed="Quiet") == {"158": 0}
+
+
+def test_tuya_transport_boost_iq_is_dps_159():
+    assert build_command("set_boost_iq", tuya_transport=True, active=False) == {"159": False}

@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 PREFIX = 0x000055AA
 SUFFIX = 0x0000AA55
 
+CMD_HEARTBEAT = 0x09
 CMD_DP_QUERY = 0x0A
 CMD_RTC = 0x20  # command type 32: P2P / "thing.m.rtc" signaling
 

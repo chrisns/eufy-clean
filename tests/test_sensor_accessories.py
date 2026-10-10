@@ -2,7 +2,11 @@ from unittest.mock import MagicMock
 
 from homeassistant.core import HomeAssistant
 
-from custom_components.robovac_mqtt.const import ACCESSORY_MAX_LIFE, DOMAIN
+from custom_components.robovac_mqtt.const import (
+    ACCESSORY_MAX_LIFE,
+    DOMAIN,
+    accessory_max_life,
+)
 from custom_components.robovac_mqtt.models import AccessoryState, VacuumState
 from custom_components.robovac_mqtt.sensor import async_setup_entry
 
@@ -53,3 +57,12 @@ async def test_accessory_sensors_setup(hass: HomeAssistant):
     # Verify negative handling (over usage)
     coordinator.data.accessories.main_brush_usage = 400
     assert rb_sensor.native_value == 0  # Should be 0, not -40 (max(0, ...))
+
+
+def test_accessory_life_uses_per_model_table():
+    """S1 Pro lifespans come from the Eufy app's accessory table."""
+    s1 = accessory_max_life("T2080A")
+    assert s1["filter_usage"] == 60 and s1["sensor_usage"] == 360
+    assert s1["scrape_usage"] == 0  # no cleaning tray on the S1 Pro
+    assert s1["side_brush_usage"] == ACCESSORY_MAX_LIFE["side_brush_usage"]
+    assert accessory_max_life("T2351") is ACCESSORY_MAX_LIFE

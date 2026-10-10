@@ -74,6 +74,8 @@ class VacuumState:
     status_code: int = 0  # Raw status value if needed
     dock_status: str | None = None  # Text description (debounced in coordinator)
     station_clean_water: int = 0  # Percentage?
+    station_clean_tank: str | None = None  # Clean water tank level (S1 Pro: banded, not %)
+    station_dirty_tank: str | None = None  # Dirty water tank level
     station_waste_water: int = 0
     dock_auto_cfg: dict[str, Any] = field(default_factory=dict)
     trigger_source: str = "unknown"
@@ -104,7 +106,7 @@ class VacuumState:
     voice_set_id: int = 1201  # current voice pack set_id (default = English Female)
 
     # scalar-protocol fields (e.g. T2210/G50)
-    boost_iq: bool = False  # BoostIQ auto-carpet-boost (scalar-protocol DPS 118)
+    boost_iq: bool = False  # BoostIQ auto-carpet-boost (scalar DPS 118 / Tuya-transport DPS 159)
     volume: int = 0  # Voice volume 0-100% (novel: DPS 161; scalar: DPS 111 0-10 *10)
     cleaning_pattern: str = (
         "Arranged"  # Path pattern Arranged/Random (scalar-protocol DPS 154)

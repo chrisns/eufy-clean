@@ -9,6 +9,7 @@ from ..const import (
     CLEAN_EXTENT_MAP,
     CLEAN_TYPE_MAP,
     DPS_MAP,
+    EUFY_CLEAN_CLEAN_SPEED,
     EUFY_CLEAN_CONTROL,
     EUFY_CLEAN_NOVEL_CLEAN_SPEED,
     MOP_CORNER_MAP,
@@ -551,17 +552,36 @@ def build_set_undisturbed_command(
     return {DPS_MAP["UNDISTURBED"]: value}
 
 
+def build_tuya_suction_command(clean_speed: str) -> dict[str, Any]:
+    """Tuya-transport protobuf robots: suction (DPS 158) is the level's name."""
+    for level in EUFY_CLEAN_NOVEL_CLEAN_SPEED[:4]:
+        if level.value.lower() == clean_speed.lower():
+            return {DPS_MAP["CLEAN_SPEED"]: level.value}
+    if clean_speed.lower() == EUFY_CLEAN_CLEAN_SPEED.BOOST_IQ.value.lower():
+        return {DPS_MAP["BOOST_IQ"]: True}
+    return {}
+
+
 def build_command(
-    command: str, api_type: str = "novel", **kwargs: Any
+    command: str, api_type: str = "novel", tuya_transport: bool = False, **kwargs: Any
 ) -> dict[str, Any]:
     """Unified command builder.
 
     *api_type* ("novel" | "scalar") lets shared commands branch to scalar
     (Tuya-style int/JSON) writes for scalar-protocol devices (e.g. T2210/G50).
     Callers that omit it get the default novel (protobuf) behaviour.
+
+    *tuya_transport* marks a protobuf robot reached over Tuya (local socket or
+    Tuya Cloud); its schema types suction and BoostIQ differently.
     """
     cmd = command.lower()
     is_scalar = api_type == "scalar"
+
+    if tuya_transport and not is_scalar:
+        if cmd == "set_fan_speed":
+            return build_tuya_suction_command(kwargs.get("fan_speed", ""))
+        if cmd == "set_boost_iq":
+            return {DPS_MAP["BOOST_IQ"]: bool(kwargs.get("active", True))}
 
     if is_scalar:
         # Movement, captured verbatim from the app's /req (see FINDINGS.md):

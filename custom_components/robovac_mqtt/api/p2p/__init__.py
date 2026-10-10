@@ -1,12 +1,13 @@
 """Local, encrypted Tuya P2P client.
 
-Opens the P2P map channel on the LAN with the device local key and returns the
-room list for robots that expose it nowhere else (``mqtt=False`` devices such as
-the S1 Pro). See ``docs/P2P_MAP_CHANNEL.md`` for the protocol.
+Opens the P2P map channel on the LAN with the device local key and streams the
+map, rooms, obstacles, restricted zones and the robot's path for robots that
+expose them nowhere else (``mqtt=False`` devices such as the S1 Pro). See
+``docs/P2P_MAP_CHANNEL.md`` for the protocol.
 """
 
 from __future__ import annotations
 
-from .session import fetch_rooms, fetch_snapshot
+from .session import P2PError, P2PSession
 
-__all__ = ["fetch_rooms", "fetch_snapshot"]
+__all__ = ["P2PError", "P2PSession"]

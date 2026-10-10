@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
@@ -44,6 +45,16 @@ class EufyMapCamera(CoordinatorEntity[EufyCleanCoordinator], Camera):
         Camera.__init__(self)
         self._attr_unique_id = f"{coordinator.device_id}_map"
         self._attr_device_info = coordinator.device_info
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Calibration for map cards, plus the live rooms on the map."""
+        attrs: dict[str, Any] = {}
+        if points := self.coordinator.calibration_points():
+            attrs["calibration_points"] = points
+        if rooms := self.coordinator.data.rooms:
+            attrs["rooms"] = {str(r["id"]): r.get("name", "") for r in rooms}
+        return attrs
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None

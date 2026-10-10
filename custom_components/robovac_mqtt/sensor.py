@@ -22,9 +22,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from ._orphan_cleanup import prune_orphan_entities
 from .const import (
-    ACCESSORY_MAX_LIFE,
     DOMAIN,
     SCALAR_ACCESSORY_MAX_LIFE,
+    STATION_TANK_LEVEL_NAMES,
+    accessory_max_life,
 )
 from .coordinator import EufyCleanCoordinator, VacuumState
 from .entity import API_TYPE_NOVEL, API_TYPE_SCALAR, filter_supported_entities
@@ -116,8 +117,8 @@ async def async_setup_entry(
         # they are skipped entirely for legacy devices. Per-protocol gating
         # (scalar vs novel) is handled by filter_supported_entities via each
         # sensor's supported_api_types. The "active_map" sensor additionally
-        # requires the MQTT/P2P transport (Tuya Cloud / local-Tuya don't carry
-        # MultiMapsManageResponse) and is appended separately below.
+        # needs a map channel (MQTT, or the local P2P feed) and is appended
+        # separately below.
         novel_sensors: list[SensorEntity] = [
             # Cleaning Time Sensor
             RoboVacSensor(
@@ -199,6 +200,28 @@ async def async_setup_entry(
                 unit=PERCENTAGE,
                 state_class=SensorStateClass.MEASUREMENT,
                 availability_fn=lambda s: "station_clean_water" in s.received_fields,
+                supported_api_types=(API_TYPE_NOVEL,),
+            ),
+            RoboVacSensor(
+                coordinator,
+                "clean_water_tank",
+                "Clean Water Tank",
+                lambda s: s.station_clean_tank,
+                device_class=SensorDeviceClass.ENUM,
+                options=list(STATION_TANK_LEVEL_NAMES.values()),
+                icon="mdi:cup-water",
+                availability_fn=lambda s: "station_tanks" in s.received_fields,
+                supported_api_types=(API_TYPE_NOVEL,),
+            ),
+            RoboVacSensor(
+                coordinator,
+                "dirty_water_tank",
+                "Dirty Water Tank",
+                lambda s: s.station_dirty_tank,
+                device_class=SensorDeviceClass.ENUM,
+                options=list(STATION_TANK_LEVEL_NAMES.values()),
+                icon="mdi:water-alert",
+                availability_fn=lambda s: "station_tanks" in s.received_fields,
                 supported_api_types=(API_TYPE_NOVEL,),
             ),
             # Dock status sensor
@@ -358,7 +381,7 @@ async def async_setup_entry(
                     if not max_h:
                         return None  # accessory not present on this device
                     return max(0, round(max_h - usage / 60))
-                max_life = ACCESSORY_MAX_LIFE.get(a, 0)
+                max_life = accessory_max_life(state.device_model).get(a, 0)
                 # Ensure we don't go negative if usage exceeds defaults
                 return max(0, max_life - usage)
 
@@ -376,7 +399,7 @@ async def async_setup_entry(
                     }
                 return {
                     "usage_hours": usage,
-                    "total_life_hours": ACCESSORY_MAX_LIFE.get(a, 0),
+                    "total_life_hours": accessory_max_life(state.device_model).get(a, 0),
                 }
 
             def accessory_available(state: VacuumState, a: str = attr) -> bool:
@@ -385,7 +408,8 @@ async def async_setup_entry(
                 if state.api_type == "scalar":
                     # Hide accessories the scalar-protocol device doesn't have (mop, tray)
                     return a in SCALAR_ACCESSORY_MAX_LIFE
-                return True
+                # A zero life in the model table means the model has no such part.
+                return bool(accessory_max_life(state.device_model).get(a))
 
             novel_sensors.append(
                 RoboVacSensor(
@@ -404,10 +428,10 @@ async def async_setup_entry(
                 )
             )
 
-        # Active map ID sensor — only populated by the MQTT/P2P transport.
-        # Tuya Cloud / local-Tuya don't carry MultiMapsManageResponse so the
-        # ID never arrives; skip the entity to avoid permanent `unavailable`.
-        if coordinator.connection_type == "mqtt":
+        # Active map ID sensor — populated by MQTT or the local P2P map feed.
+        # Tuya Cloud polling never carries it; skip the entity there to avoid a
+        # permanent `unavailable`.
+        if coordinator.connection_type in ("mqtt", "local"):
             novel_sensors.append(
                 RoboVacSensor(
                     coordinator,
@@ -469,6 +493,7 @@ class RoboVacSensor(CoordinatorEntity[EufyCleanCoordinator], SensorEntity):
         suggested_display_precision: int | None = None,
         suggested_unit_of_measurement: str | None = None,
         supported_api_types: tuple[str, ...] | None = None,
+        options: list[str] | None = None,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
@@ -493,6 +518,8 @@ class RoboVacSensor(CoordinatorEntity[EufyCleanCoordinator], SensorEntity):
         self._attr_device_class = device_class
         self._attr_state_class = state_class
         self._attr_entity_category = category
+        if options is not None:
+            self._attr_options = options
         if icon:
             self._attr_icon = icon
         if suggested_display_precision is not None:
