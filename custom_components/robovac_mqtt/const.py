@@ -270,6 +270,10 @@ EUFY_CLEAN_NOVEL_CLEAN_SPEED = [
 ]
 
 
+# WorkStatus.State.REMOTE_CTRL: the robot is being driven by hand.
+WORK_STATE_REMOTE_CTRL = 6
+
+
 class EUFY_CLEAN_CONTROL(int, Enum):
     START_AUTO_CLEAN = 0
     START_SELECT_ROOMS_CLEAN = 1

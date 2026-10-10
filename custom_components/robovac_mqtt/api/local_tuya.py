@@ -32,10 +32,11 @@ except ImportError:  # pragma: no cover - tinytuya is declared in manifest.json
 
 _LOGGER = logging.getLogger(__name__)
 
-# tinytuya's blocking receive() should return promptly so we can react to
-# cancellation; values larger than ~5 s leave us blocked too long if the
-# device goes silent.
-_RECV_TIMEOUT = 5.0
+# receive() holds the device lock for the whole timeout, and send_command()
+# queues behind it, so this is also the worst-case latency of every command
+# (a drive command used to wait up to 5 s). Short enough to feel instant, long
+# enough not to spin.
+_RECV_TIMEOUT = 0.5
 _RECONNECT_BACKOFF_INITIAL = 5.0
 _RECONNECT_BACKOFF_MAX = 60.0
 # The dock drops a local socket that stays silent for ~30 s; a heartbeat every
