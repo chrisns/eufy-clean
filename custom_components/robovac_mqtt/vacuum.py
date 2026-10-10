@@ -517,17 +517,19 @@ class RoboVacMQTTEntity(CoordinatorEntity[EufyCleanCoordinator], StateVacuumEnti
                 loop = asyncio.get_running_loop()
                 end = loop.time() + duration
                 while True:
-                    await coordinator.async_send_command(command)
+                    await coordinator.async_send_command(command, wait=False)
                     if loop.time() + _REMOTE_REPEAT_SECONDS >= end:
                         break
                     await asyncio.sleep(_REMOTE_REPEAT_SECONDS)
             finally:
                 await coordinator.async_send_command(
-                    coordinator.build_device_command("remote_move", direction="brake")
+                    coordinator.build_device_command("remote_move", direction="brake"),
+                    wait=False,
                 )
             return
         await coordinator.async_send_command(
-            coordinator.build_device_command("remote_move", direction="brake")
+            coordinator.build_device_command("remote_move", direction="brake"),
+            wait=False,
         )
 
     async def async_map_load(self, cloud_mapid: int, seq: int = 1) -> None:

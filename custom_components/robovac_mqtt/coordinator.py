@@ -915,8 +915,14 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         )
         self.async_set_updated_data(new_state)
 
-    async def async_send_command(self, command_dict: dict[str, Any]) -> None:
-        """Send command to device."""
+    async def async_send_command(
+        self, command_dict: dict[str, Any], *, wait: bool = True
+    ) -> None:
+        """Send command to device.
+
+        ``wait=False`` is honoured by the local Tuya transport only (see
+        ``LocalTuyaClient.send_command``); other transports always wait.
+        """
         if not command_dict:
             _LOGGER.debug("Ignoring empty command for %s", self.device_name)
             return
@@ -928,8 +934,10 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
             if self.connection_type == "cloud":
                 await self.eufy_login.sendCloudCommand(self.device_id, command_dict)
             elif self.client:
-                # Both LocalTuyaClient and EufyCleanClient expose send_command.
-                await self.client.send_command(command_dict)
+                if isinstance(self.client, LocalTuyaClient):
+                    await self.client.send_command(command_dict, wait=wait)
+                else:
+                    await self.client.send_command(command_dict)
             else:
                 raise HomeAssistantError(
                     f"Cannot send command to {self.device_name}: no connection available"

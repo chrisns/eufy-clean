@@ -23,6 +23,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 try:
@@ -158,8 +159,12 @@ class LocalTuyaClient:
                 pass
             self._listen_task = None
 
-    async def send_command(self, dps: dict[str, Any]) -> None:
+    async def send_command(self, dps: dict[str, Any], *, wait: bool = True) -> None:
         """Send a DPS write to the device.
+
+        ``wait=False`` skips waiting for the device's reply (which arrives as an
+        ordinary push for anything it acts on). Drive commands get no reply at all,
+        so waiting on them just stalls the next command by the socket timeout.
 
         ``dps`` is a mapping of DPS index (string) to value matching the same
         format the MQTT and Cloud transports use. Values may be plain
@@ -179,7 +184,7 @@ class LocalTuyaClient:
         try:
             async with self._dev_lock:
                 await self._loop.run_in_executor(
-                    None, self._dev.set_multiple_values, dps
+                    None, partial(self._dev.set_multiple_values, dps, nowait=not wait)
                 )
         except Exception as e:  # noqa: BLE001 - tinytuya raises broadly
             raise LocalTuyaError(

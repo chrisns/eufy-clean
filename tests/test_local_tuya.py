@@ -81,8 +81,21 @@ async def test_send_command_calls_set_multiple(patch_tinytuya, fake_dev):
     finally:
         await client.disconnect()
     fake_dev.set_multiple_values.assert_called_once_with(
-        {"154": "BgoEIgIIAg=="}
+        {"154": "BgoEIgIIAg=="}, nowait=False
     )
+
+
+@pytest.mark.asyncio
+async def test_send_command_can_skip_the_reply_wait(patch_tinytuya, fake_dev):
+    """Drive commands get no reply; waiting on one stalls the next by the socket timeout."""
+    client = LocalTuyaClient(device_id="dev1", local_key="k" * 16, host="1.2.3.4")
+    client.set_on_message(lambda _b: None)
+    await client.connect()
+    try:
+        await client.send_command({"155": "AggB"}, wait=False)
+    finally:
+        await client.disconnect()
+    fake_dev.set_multiple_values.assert_called_once_with({"155": "AggB"}, nowait=True)
 
 
 @pytest.mark.asyncio
