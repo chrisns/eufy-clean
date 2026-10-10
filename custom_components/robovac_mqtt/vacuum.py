@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -99,6 +100,10 @@ def _segment_name_map(segments: list[Segment]) -> dict[str, str]:
 
 _LOGGER = logging.getLogger(__name__)
 
+# The app resends a drive command every 500 ms while its joystick is held.
+_REMOTE_REPEAT_SECONDS = 0.5
+_REMOTE_MAX_SECONDS = 10.0
+
 # CLEAN_AREA was added in HA 2026.3; fall back gracefully on older installs
 _CLEAN_AREA_FEATURE = getattr(VacuumEntityFeature, "CLEAN_AREA", None)
 
@@ -156,6 +161,20 @@ async def async_setup_entry(
         },
         "async_room_at_point",
         supports_response=SupportsResponse.ONLY,
+    )
+    # Manual drive: repeats the move like the app's joystick (every 500 ms), then
+    # brakes. See async_remote_drive.
+    platform.async_register_entity_service(
+        "remote_drive",
+        {
+            vol.Required("direction"): vol.In(
+                ["forward", "back", "left", "right", "brake"]
+            ),
+            vol.Optional("duration", default=1.0): vol.All(
+                vol.Coerce(float), vol.Range(min=0, max=_REMOTE_MAX_SECONDS)
+            ),
+        },
+        "async_remote_drive",
     )
     # Switch the active map to another saved multi-map by its cloud map id
     # (novel/protobuf devices only). See async_map_load / build_map_load_command
@@ -481,6 +500,35 @@ class RoboVacMQTTEntity(CoordinatorEntity[EufyCleanCoordinator], StateVacuumEnti
         if room_id is None:
             return {"room_id": -1, "room_name": ""}
         return {"room_id": room_id, "room_name": room_name or ""}
+
+    async def async_remote_drive(self, direction: str, duration: float = 1.0) -> None:
+        """Drive by hand for ``duration`` seconds, then brake.
+
+        The robot only keeps moving while the command is repeated, so a single
+        service call becomes a bounded run: safe against a lost connection or a
+        stuck automation. ``brake`` (or a zero duration) just stops.
+        """
+        coordinator = self.coordinator
+        if coordinator.api_type != "novel":
+            raise HomeAssistantError("Manual drive needs a protobuf (novel) robot")
+        if direction != "brake" and duration > 0:
+            command = coordinator.build_device_command("remote_move", direction=direction)
+            try:
+                loop = asyncio.get_running_loop()
+                end = loop.time() + duration
+                while True:
+                    await coordinator.async_send_command(command)
+                    if loop.time() + _REMOTE_REPEAT_SECONDS >= end:
+                        break
+                    await asyncio.sleep(_REMOTE_REPEAT_SECONDS)
+            finally:
+                await coordinator.async_send_command(
+                    coordinator.build_device_command("remote_move", direction="brake")
+                )
+            return
+        await coordinator.async_send_command(
+            coordinator.build_device_command("remote_move", direction="brake")
+        )
 
     async def async_map_load(self, cloud_mapid: int, seq: int = 1) -> None:
         """Switch the active map to a saved multi-map by its cloud map id.

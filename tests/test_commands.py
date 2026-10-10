@@ -24,7 +24,10 @@ from custom_components.robovac_mqtt.const import (
     EUFY_CLEAN_CONTROL,
     SCALAR_DPS,
 )
-from custom_components.robovac_mqtt.proto.cloud.control_pb2 import ModeCtrlRequest
+from custom_components.robovac_mqtt.proto.cloud.control_pb2 import (
+    ModeCtrlRequest,
+    RemoteCtrl,
+)
 from custom_components.robovac_mqtt.proto.cloud.multi_maps_pb2 import (
     MultiMapsManageRequest,
 )
@@ -344,3 +347,17 @@ def test_tuya_transport_suction_is_the_level_name():
 
 def test_tuya_transport_boost_iq_is_dps_159():
     assert build_command("set_boost_iq", tuya_transport=True, active=False) == {"159": False}
+
+
+def test_remote_move_commands():
+    """Manual drive writes a RemoteCtrl on DPS 155; unknown directions build nothing."""
+    for name, value in (("brake", 0), ("forward", 1), ("back", 2), ("left", 3), ("right", 4)):
+        command = build_command("remote_move", direction=name)
+        assert list(command) == ["155"]
+        assert decode(RemoteCtrl, command["155"]).direction == value
+    assert build_command("remote_move", direction="sideways") == {}
+
+
+def test_remote_mode_enter_and_exit():
+    assert decode(ModeCtrlRequest, build_command("start_remote")["152"]).method == 5
+    assert decode(ModeCtrlRequest, build_command("stop_remote")["152"]).method == 16

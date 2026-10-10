@@ -403,3 +403,50 @@ async def test_forget_map_active_raises(mock_coordinator, mock_config_entry):
         await entity.async_forget_map(11)
     mock_coordinator.async_forget_map.assert_not_called()
     mock_coordinator.async_send_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_remote_drive_repeats_then_brakes(mock_coordinator, mock_config_entry):
+    """One service call is a bounded run: repeated moves, then always a brake."""
+    entity = RoboVacMQTTEntity(mock_coordinator, mock_config_entry)
+    mock_coordinator.build_device_command = MagicMock(
+        side_effect=lambda cmd, **kw: {"cmd": kw["direction"]}
+    )
+    with patch("custom_components.robovac_mqtt.vacuum._REMOTE_REPEAT_SECONDS", 0.01):
+        await entity.async_remote_drive("forward", 0.05)
+    sent = [c.args[0]["cmd"] for c in mock_coordinator.async_send_command.await_args_list]
+    assert sent[0] == "forward" and sent.count("forward") >= 2
+    assert sent[-1] == "brake" and sent.count("brake") == 1
+
+
+@pytest.mark.asyncio
+async def test_remote_drive_brakes_even_if_a_send_fails(mock_coordinator, mock_config_entry):
+    entity = RoboVacMQTTEntity(mock_coordinator, mock_config_entry)
+    mock_coordinator.build_device_command = MagicMock(
+        side_effect=lambda cmd, **kw: {"cmd": kw["direction"]}
+    )
+    mock_coordinator.async_send_command = AsyncMock(
+        side_effect=[HomeAssistantError("lost"), None]
+    )
+    with pytest.raises(HomeAssistantError):
+        await entity.async_remote_drive("left", 1)
+    assert mock_coordinator.async_send_command.await_args_list[-1].args[0] == {"cmd": "brake"}
+
+
+@pytest.mark.asyncio
+async def test_remote_drive_brake_and_zero_duration_only_stop(mock_coordinator, mock_config_entry):
+    entity = RoboVacMQTTEntity(mock_coordinator, mock_config_entry)
+    mock_coordinator.build_device_command = MagicMock(
+        side_effect=lambda cmd, **kw: {"cmd": kw["direction"]}
+    )
+    await entity.async_remote_drive("brake")
+    await entity.async_remote_drive("forward", 0)
+    assert [c.args[0]["cmd"] for c in mock_coordinator.async_send_command.await_args_list] == ["brake", "brake"]
+
+
+@pytest.mark.asyncio
+async def test_remote_drive_rejects_non_protobuf_robots(mock_coordinator, mock_config_entry):
+    mock_coordinator.api_type = "scalar"
+    entity = RoboVacMQTTEntity(mock_coordinator, mock_config_entry)
+    with pytest.raises(HomeAssistantError):
+        await entity.async_remote_drive("forward", 1)

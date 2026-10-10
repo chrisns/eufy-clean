@@ -25,6 +25,7 @@ from ..proto.cloud.common_pb2 import Point, Quadrangle
 from ..proto.cloud.consumable_pb2 import ConsumableRequest
 from ..proto.cloud.control_pb2 import (
     ModeCtrlRequest,
+    RemoteCtrl,
     SelectRoomsClean,
     SelectZonesClean,
 )
@@ -70,6 +71,29 @@ def _build_mode_ctrl(method: int) -> dict[str, str]:
 
     value = encode(ModeCtrlRequest, data)
     return {DPS_MAP["PLAY_PAUSE"]: value}
+
+
+REMOTE_DIRECTIONS: dict[str, RemoteCtrl.Direction] = {
+    "brake": RemoteCtrl.BRAKE,
+    "forward": RemoteCtrl.FORWARD,
+    "back": RemoteCtrl.BACK,
+    "left": RemoteCtrl.LEFT,
+    "right": RemoteCtrl.RIGHT,
+}
+
+
+def build_remote_move_command(direction: str) -> dict[str, str]:
+    """Drive the robot by hand (DPS 155 ``RemoteCtrl``).
+
+    Any direction enters remote-control mode; the robot keeps moving only while
+    the command is repeated (the app resends every 500 ms), and ``brake`` stops
+    it without leaving the mode. Unknown directions build nothing.
+    """
+    value = REMOTE_DIRECTIONS.get(direction.lower())
+    if value is None:
+        _LOGGER.warning("Invalid remote direction '%s' ignored", direction)
+        return {}
+    return {DPS_MAP["DIRECTION"]: encode_message(RemoteCtrl(direction=value))}
 
 
 def _build_manual_cmd(cmd_name: str, active: bool = True) -> dict[str, str]:
@@ -652,6 +676,12 @@ def build_command(
         )
     if cmd == "set_fan_speed":
         return build_set_clean_speed_command(kwargs.get("fan_speed", ""))
+    if cmd == "start_remote":
+        return _build_mode_ctrl(EUFY_CLEAN_CONTROL.START_RC_CLEAN)
+    if cmd == "stop_remote":
+        return _build_mode_ctrl(EUFY_CLEAN_CONTROL.STOP_RC_CLEAN)
+    if cmd == "remote_move":
+        return build_remote_move_command(kwargs.get("direction", ""))
     if cmd == "set_water_level":
         return build_set_water_level_command(kwargs.get("water_level", ""))
     if cmd == "scene_clean":
