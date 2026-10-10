@@ -11,6 +11,7 @@ from PIL import Image
 
 from custom_components.robovac_mqtt.api.map_render import render_map
 from custom_components.robovac_mqtt.api.map_stream import MapData
+from custom_components.robovac_mqtt.const import WORK_STATE_REMOTE_CTRL
 from custom_components.robovac_mqtt.coordinator import EufyCleanCoordinator
 from custom_components.robovac_mqtt.models import VacuumState
 
@@ -679,3 +680,17 @@ def test_calibration_points_match_the_renderer(mock_hass, mock_login):
     # +500 cm in x = +100 grid cells; +500 cm in y moves up the image.
     assert points[1]["map"] == {"x": 1005.0, "y": 95.0}
     assert points[2]["map"] == {"x": 5.0, "y": -905.0}
+
+
+def test_remote_control_is_not_treated_as_the_robot_moving_for_p2p():
+    """The robot refuses P2P while it is driven by hand; the map feed must leave it alone."""
+
+    class _Stub:
+        data = VacuumState(activity="cleaning", status_code=3)
+
+    stub = _Stub()
+    assert EufyCleanCoordinator._robot_is_moving(stub) is True
+    stub.data = VacuumState(activity="cleaning", status_code=WORK_STATE_REMOTE_CTRL)
+    assert EufyCleanCoordinator._robot_is_moving(stub) is False
+    stub.data = VacuumState(activity="docked", status_code=0)
+    assert EufyCleanCoordinator._robot_is_moving(stub) is False

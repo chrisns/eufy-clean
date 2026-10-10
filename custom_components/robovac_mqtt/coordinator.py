@@ -55,6 +55,7 @@ from .const import (
     DEFAULT_NOTIFY_MOBILE_SERVICE,
     DEFAULT_ROBOT_STYLE,
     DOMAIN,
+    WORK_STATE_REMOTE_CTRL,
 )
 from .models import VacuumState
 from .p2p_map import P2PMapFeed
@@ -312,7 +313,12 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         self.p2p.start()
 
     def _robot_is_moving(self) -> bool:
-        return self.data.activity in ("cleaning", "returning")
+        # While it is being driven by hand the robot refuses every P2P session
+        # (and a stream of refused attempts only upsets it), so leave it alone.
+        return (
+            self.data.activity in ("cleaning", "returning")
+            and self.data.status_code != WORK_STATE_REMOTE_CTRL
+        )
 
     @callback
     def _on_p2p_change(self, changed: set[str]) -> None:
@@ -433,7 +439,11 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
                         self._clear_error_notification()
 
                 _rerender_after_update = False
-                if "activity" in changes and self.p2p is not None:
+                if (
+                    "activity" in changes
+                    and self.p2p is not None
+                    and new_state.status_code != WORK_STATE_REMOTE_CTRL
+                ):
                     self.p2p.poke()
                 if "activity" in changes:
                     # Clear trail when a new cleaning session starts, but preserve it
