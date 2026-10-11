@@ -694,3 +694,12 @@ def test_remote_control_is_not_treated_as_the_robot_moving_for_p2p():
     assert EufyCleanCoordinator._robot_is_moving(stub) is False
     stub.data = VacuumState(activity="docked", status_code=0)
     assert EufyCleanCoordinator._robot_is_moving(stub) is False
+
+
+def test_s1_pro_remote_command_uses_its_model_context(mock_hass, mock_login):
+    device_info = {
+        "deviceId": "dev1", "deviceModel": "T2080A", "deviceName": "Vac", "apiType": "novel",
+    }
+    coordinator = EufyCleanCoordinator(mock_hass, mock_login, device_info)
+    assert coordinator.build_device_command("remote_move", direction="left") == {"155": "BBICCAM="}
+    assert coordinator.build_device_command("remote_move", direction="brake") == {"155": "AhIA"}

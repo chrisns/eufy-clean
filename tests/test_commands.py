@@ -2,6 +2,8 @@
 
 import base64
 
+import pytest
+
 from custom_components.robovac_mqtt.api.commands import (
     _build_off_peak_sub_bytes,
     build_command,
@@ -18,7 +20,10 @@ from custom_components.robovac_mqtt.api.commands import (
     build_set_water_level_command,
     build_zone_clean_command,
 )
-from custom_components.robovac_mqtt.api.parser import _extract_off_peak_charging
+from custom_components.robovac_mqtt.api.parser import (
+    _decode_raw_varints,
+    _extract_off_peak_charging,
+)
 from custom_components.robovac_mqtt.const import (
     DPS_MAP,
     EUFY_CLEAN_CONTROL,
@@ -369,3 +374,17 @@ def test_set_height_detection_matches_the_app_payloads():
     assert build_command("set_height_detection", mode="medium") == {"176": "A9gGAg=="}
     assert build_command("set_height_detection", mode="FREE") == {"176": "A9gGAw=="}
     assert build_command("set_height_detection", mode="nope") == {}
+
+
+@pytest.mark.parametrize(("direction", "value"), [("brake", 0), ("forward", 1), ("back", 2), ("left", 3), ("right", 4)])
+def test_s1_pro_remote_direction_uses_the_v2_normal_envelope(direction, value):
+    """Decode method=NORMAL and its nested value, including a present BRAKE parameter."""
+    command = build_command("remote_move", model="T2080A", direction=direction)
+    raw = base64.b64decode(command["155"])
+    length, pos = decode_varint(raw, 0)
+    assert length == len(raw) - pos
+    request = _decode_raw_varints(raw[pos:])
+    assert request.get(1, 0) == 0  # NORMAL, not ROCKER
+    assert set(request) == {2}  # normal remains present even with default value 0
+    assert _decode_raw_varints(request[2]).get(1, 0) == value
+    assert build_command("remote_move", model="T2351", direction=direction) == build_command("remote_move", direction=direction)

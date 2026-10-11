@@ -197,6 +197,7 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         """
         if self.api_type == "legacy":
             return build_legacy_command(command, **kwargs)
+        kwargs.setdefault("model", self.device_model)
         return build_command(
             command, api_type=self.api_type, tuya_transport=self.tuya_transport, **kwargs
         )

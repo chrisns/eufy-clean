@@ -113,9 +113,10 @@ def build_set_height_detection_command(mode: str) -> dict[str, str]:
     return {}
 
 
-def build_remote_move_command(direction: str) -> dict[str, str]:
+def build_remote_move_command(direction: str, *, v2: bool = False) -> dict[str, str]:
     """Drive the robot by hand (DPS 155 ``RemoteCtrl``).
 
+    ``v2`` selects the S1 Pro normal-direction envelope; older models use RemoteCtrl.
     Any direction enters remote-control mode; the robot keeps moving only while
     the command is repeated (the app resends every 500 ms), and ``brake`` stops
     it without leaving the mode. Unknown directions build nothing.
@@ -124,6 +125,12 @@ def build_remote_move_command(direction: str) -> dict[str, str]:
     if value is None:
         _LOGGER.warning("Invalid remote direction '%s' ignored", direction)
         return {}
+    if v2:
+        # S1 Pro: NewRemoteCtrlV2.method=NORMAL (0, omitted), normal (field 2)
+        # containing Normal.value (field 1). Keep normal present even for BRAKE.
+        normal = bytes([0x08, value]) if value else b""
+        body = _encode_proto_ldelim(2, normal)
+        return {DPS_MAP["DIRECTION"]: base64.b64encode(encode_varint(len(body)) + body).decode()}
     return {DPS_MAP["DIRECTION"]: encode_message(RemoteCtrl(direction=value))}
 
 
@@ -720,7 +727,7 @@ def build_command(
     if cmd == "stop_remote":
         return _build_mode_ctrl(EUFY_CLEAN_CONTROL.STOP_RC_CLEAN)
     if cmd == "remote_move":
-        return build_remote_move_command(kwargs.get("direction", ""))
+        return build_remote_move_command(kwargs.get("direction", ""), v2=kwargs.get("model") == "T2080A")
     if cmd == "set_water_level":
         return build_set_water_level_command(kwargs.get("water_level", ""))
     if cmd == "scene_clean":

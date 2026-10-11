@@ -173,6 +173,14 @@ pictures. HD retained every keyframe in a full-minute live test at 800x600, 10 f
 with no decoder errors. The video watchdog checks decoded JPEG progress, so
 incoming packets alone cannot keep a frozen session alive indefinitely.
 
+The S1 Pro also needs the V2 remote-control envelope on DP 155:
+`NewRemoteCtrlV2{method: NORMAL (0), normal{value: direction}}`, with the usual
+length prefix. The older `RemoteCtrl{direction}` is acknowledged but does not
+move this robot. Keep the `normal` sub-message present for BRAKE (value 0).
+The iOS descriptor confirms method field 1, normal field 2, and its value field 1;
+a bounded V2 turn changed the live HA camera view. Other models retain the older
+message until their protocol has been verified.
+
 ## The cloud config is single-use
 
 `m.ipc.v4.rtc.config.get` returns, besides the device password and the ICE
