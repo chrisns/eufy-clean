@@ -104,6 +104,11 @@ missing on the fork; GitHub cannot identify the license on either repository
 (`NOASSERTION`). These are separate from the passing integration manifest and
 HACS metadata checks; the existing license is not changed by this PR.
 
+The test workflow also supports explicit runs on the fork. Dependency install
+failures now stop the job. The clean runner exposed a missing development
+dependency, `voluptuous-serialize`, used by the configuration-form serialization
+regressions; it is declared in both development dependency lists.
+
 The HA camera and movement evidence was obtained before this maintenance review.
 The reviewed transport received an additional live map check; the camera startup
 burst retains the exact proven HD packet bytes. The maintenance changes are in
