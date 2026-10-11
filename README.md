@@ -418,3 +418,6 @@ robot vacuum, eufy x10 pro omni, eufy c28 omni, eufy x9 pro, eufy l70, eufy g50,
 eufy mqtt, robovac mqtt, room cleaning, floor map, live map, eufy integration,
 home assistant vacuum, eufy home assistant, anker eufy, robot vacuum automation
 -->
+
+For S1 Pro screen codes and the optional bounded docking retry automation, see
+[Docking recovery](docs/DOCKING_RECOVERY.md).

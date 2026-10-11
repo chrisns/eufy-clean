@@ -167,9 +167,9 @@ async def test_legacy_coordinator_excludes_novel_sensors():
 
     await async_setup_entry(hass, config_entry, added_entities.extend)
 
-    # Should have exactly 4 universal sensors: Battery, Error Message, Task Status, Work Mode
+    # Should have exactly 5 universal sensors: Battery, Error Code, Error Message, Task Status, Work Mode
     entity_ids = [e.unique_id for e in added_entities]
-    assert len(added_entities) == 4
+    assert len(added_entities) == 5
     assert "legacy_dev_battery" in entity_ids
     assert "legacy_dev_error_message" in entity_ids
     assert "legacy_dev_task_status" in entity_ids
@@ -214,7 +214,7 @@ async def test_novel_coordinator_creates_all_sensors():
     # Full novel sensor set (universals + novel-only + device-info + accessories).
     # Exact count guarded against accidental duplicates from the merge.
     assert len(set(entity_ids)) == len(added_entities), "duplicate sensor unique_ids"
-    assert len(added_entities) == 27
+    assert len(added_entities) == 28
 
     # Universal sensors
     for suffix in ["battery", "error_message", "task_status", "work_mode"]:
@@ -250,7 +250,7 @@ async def test_novel_cloud_skips_map_channel_sensors():
 
     Local Tuya robots get the map id from the P2P feed, so they keep it.
     """
-    for transport, expected in (("cloud", 26), ("local", 27)):
+    for transport, expected in (("cloud", 27), ("local", 28)):
         coordinator = MagicMock()
         coordinator.device_id = f"novel_{transport}"
         coordinator.device_name = f"Novel Vac ({transport})"

@@ -57,6 +57,7 @@ from .const import (
     DOMAIN,
     WORK_STATE_REMOTE_CTRL,
 )
+from .errors import screen_error_code
 from .models import VacuumState
 from .p2p_map import P2PMapFeed
 from .video_stream import RobotVideo
@@ -853,7 +854,7 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         entry = self.hass.config_entries.async_get_entry(self.entry_id)
         opts = entry.options if entry else {}
         title = f"{self.device_name} Error"
-        msg = f"Error {code}: {message.title()}"
+        msg = f"Error {screen_error_code(code, self.device_model)}: {message}"
         if opts.get(CONF_NOTIFY_DESKTOP, DEFAULT_NOTIFY_DESKTOP):
             pn_async_create(
                 self.hass,

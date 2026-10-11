@@ -29,6 +29,7 @@ from .const import (
 )
 from .coordinator import EufyCleanCoordinator, VacuumState
 from .entity import API_TYPE_NOVEL, API_TYPE_SCALAR, filter_supported_entities
+from .errors import error_attributes, error_sensor_value
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +73,15 @@ async def async_setup_entry(
         sensors: list[SensorEntity] = [
             # Battery sensor
             BatterySensorEntity(coordinator),
+            RoboVacSensor(
+                coordinator,
+                "error_code",
+                "Error Code",
+                error_sensor_value,
+                icon="mdi:alert-circle-outline",
+                category=EntityCategory.DIAGNOSTIC,
+                extra_state_attributes_fn=error_attributes,
+            ),
             # Error Message Sensor
             RoboVacSensor(
                 coordinator,

@@ -40,6 +40,7 @@ from .const import (
     WORK_STATE_REMOTE_CTRL,
 )
 from .coordinator import EufyCleanCoordinator
+from .errors import error_attributes
 
 if TYPE_CHECKING:
     from homeassistant.components.vacuum import Segment
@@ -626,7 +627,7 @@ class RoboVacMQTTEntity(CoordinatorEntity[EufyCleanCoordinator], StateVacuumEnti
             "cleaning_area": data.cleaning_area,
             "task_status": data.task_status,
             "trigger_source": data.trigger_source,
-            "error_code": data.error_code,
+            **error_attributes(data),
             "error_message": data.error_message,
             "status_code": data.status_code,
             "work_mode": data.work_mode,

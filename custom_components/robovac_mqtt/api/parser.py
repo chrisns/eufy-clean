@@ -33,6 +33,7 @@ from ..const import (
     MopWaterLevel,
     TriggerSource,
 )
+from ..errors import S1_PRO_MODELS, s1_error_message
 from ..models import AccessoryState, VacuumState, track_received_field
 from ..proto.cloud.app_device_info_pb2 import DeviceInfo
 from ..proto.cloud.clean_param_pb2 import CleanParamRequest, CleanParamResponse
@@ -230,6 +231,46 @@ def update_state(
     # Log received_fields for debugging sensor availability
     if "received_fields" in changes:
         _LOGGER.debug("Received fields now: %s", changes["received_fields"])
+
+    if "error_code" in changes:
+        code = changes["error_code"]
+        changes.setdefault("error_codes", (code,) if code else ())
+        if code:
+            changes["error_message"] = s1_error_message(code, state.device_model) or changes["error_message"]
+            changes["last_error_code"] = code
+            changes["last_error_message"] = changes["error_message"]
+
+    # A confirmed healthy WorkStatus means a previous S1 fault was recovered.
+    # Do not infer recovery from standby/pause, command echoes or manual mode.
+    # A newly raised fault in the same packet wins over a healthy status snapshot.
+    healthy = (
+        state.device_model.upper() in S1_PRO_MODELS
+        and "status_code" in changes
+        and changes["status_code"] != 6
+        and changes.get("activity") in ("cleaning", "returning", "docked")
+    )
+    new_fault = False
+    if healthy:
+        try:
+            work_status = decode(WorkStatus, dps[DPS_MAP["WORK_STATUS"]])
+            healthy = not (
+                work_status.HasField("charging") and work_status.charging.state == 2
+            ) and not any(
+                work_status.HasField(field) and getattr(work_status, field).state == 1
+                for field in ("mapping", "cleaning", "go_wash", "go_home", "cruisiing")
+            )
+        except Exception:
+            healthy = False
+    if healthy and DPS_MAP["ERROR_CODE"] in dps:
+        try:
+            new_fault = any(decode(ErrorCode, dps[DPS_MAP["ERROR_CODE"]]).new_code.error)
+        except Exception:  # The main parser logs malformed reports; retain the fault.
+            new_fault = True
+    if healthy and not new_fault and changes.get("error_code", state.error_code):
+        if state.error_code and "last_error_code" not in changes:
+            changes["last_error_code"] = state.error_code
+            changes["last_error_message"] = state.error_message
+        changes.update(error_code=0, error_message="", error_codes=())
 
     return replace(state, **changes), changes
 
@@ -507,6 +548,9 @@ def _process_other_dps(
                     ),
                     0,
                 )
+                changes["error_codes"] = tuple(dict.fromkeys(
+                    c for c in (*error_proto.error, *error_proto.new_code.error, *error_proto.warn) if c
+                ))
                 if code:
                     changes["error_code"] = code
                     changes["error_message"] = EUFY_CLEAN_ERROR_CODES.get(

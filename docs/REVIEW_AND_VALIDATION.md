@@ -14,7 +14,7 @@ The protocol details are in [P2P_MAP_CHANNEL.md](P2P_MAP_CHANNEL.md).
 | HA manual drive, separate early attempt | Two three-second left turns visibly rotated the camera view; mean grayscale difference 64.877 |
 | Mode gating | Camera unavailable before manual mode and after leaving it; viewing does not change mode |
 | Reviewed transport, fresh live map session | Seven stream objects, eight rooms and a pose decoded with PUSH tag verification and strict CBC padding; 10,127 decrypted bytes |
-| Automated validation | 721 pytest tests passed; all required pre-commit hooks passed |
+| Automated validation | 742 pytest tests passed; all required pre-commit hooks passed |
 
 The 45-second camera attempt's late turn produced almost identical snapshots.
 It is evidence for sustained video, not for movement. The separate early drive
@@ -112,9 +112,9 @@ installs FFmpeg so the generated H.265-to-JPEG test runs instead of being skippe
 
 The HA camera and movement evidence was obtained before this maintenance review.
 The reviewed transport received an additional live map check; the camera startup
-burst retains the exact proven HD packet bytes. The maintenance changes are in
-the PR and local checkout. The running HA process retains the previously verified
-build until its next restart; no further full HA restart was needed for this review.
+burst retains the exact proven HD packet bytes. The initial maintenance review was delivered to the PR and local checkout without
+an additional HA restart. The subsequent docking-error follow-up deployed this
+reviewed build together with error recovery in one combined HA restart.
 
 ## Existing captures
 
@@ -126,3 +126,11 @@ the successful HA turn test. They are demonstrations, not generated fixtures.
 - [Rendered HA map](screenshots/map.png)
 - [Robot before the turn](screenshots/robot-before.jpg)
 - [Robot after the turn](screenshots/robot-after.jpg)
+
+## Docking fault follow-up
+
+The 2026-10-11 follow-up recovered the exact S1 Pro E75/raw 19924741 and
+E30/raw 19923712 mappings from the vendor app. Active errors now clear on a
+confirmed healthy WorkStatus and retain last-error diagnostics. The tested
+three-attempt/30-minute HA automation and its deployment details are in
+[DOCKING_RECOVERY.md](DOCKING_RECOVERY.md).

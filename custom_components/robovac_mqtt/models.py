@@ -51,6 +51,9 @@ class VacuumState:
     # Error state
     error_code: int = 0
     error_message: str = ""
+    error_codes: tuple[int, ...] = ()  # All reported codes, faults before warnings
+    last_error_code: int = 0
+    last_error_message: str = ""
     charging: bool = False
 
     # Cleaning Stats
