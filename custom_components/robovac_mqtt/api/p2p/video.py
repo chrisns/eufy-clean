@@ -107,8 +107,6 @@ class RtpHevcReader:
             yield _START_CODE + payload
 
 
-VARIANT_WAIT = 3.0  # how long a start variant gets to produce video before the next is tried
-VARIANT_PASSES = 2  # the whole ladder is walked this many times
 # After the robot confirms its stream is open, give the camera pipeline this long to
 # come up before the first start request: earlier sessions that streamed had the
 # stream open for several seconds first.
@@ -120,9 +118,8 @@ class VideoSession(P2PSession):
 
     ``open_stream`` is awaited once the control channel is up and before any video
     start is sent, which is the app's order (connect, then ask the robot to open its
-    stream). Each start variant then gets a few seconds to produce video before the
-    next is tried, all within this one session: the robot only has a few session
-    slots, so a single session should answer as much as it can.
+    stream). The verified HD startup sequence is sent once; the session timeout
+    and the caller's backoff handle a robot that does not produce video.
     """
 
     _stream_label = "camera stream"
@@ -136,11 +133,11 @@ class VideoSession(P2PSession):
     ) -> None:
         super().__init__(on_object=lambda _name, _obj: None, **kwargs)
         self._on_nal = on_nal
-        self.connect_timeout = 10 + STREAM_SETTLE + VARIANT_WAIT * VARIANT_PASSES * len(control.VIDEO_START_VARIANTS)
+        # Budget for ICE, DP 181 replies, the settle delay and the first NAL.
+        self.connect_timeout = 30.0
         self._open_stream = open_stream
         self._start_task: asyncio.Future | None = None
         self.reader = RtpHevcReader()
-        self.variant_used: str | None = None
 
     def _extra_conversations(self) -> dict[int, kcp.KcpConversation]:
         return {
@@ -150,6 +147,8 @@ class VideoSession(P2PSession):
         }
 
     def _send_control_burst(self) -> None:
+        if self._closed.is_set():
+            return
         self._start_task = asyncio.ensure_future(self._start_video())
 
     async def _start_video(self) -> None:
@@ -166,17 +165,9 @@ class VideoSession(P2PSession):
                     # and let the start requests decide.
                     _LOGGER.debug("p2p: stream-open not confirmed (%s); asking for video anyway", err)
             await asyncio.sleep(STREAM_SETTLE if self._open_stream is not None else 0.2)
-            for variant in control.VIDEO_START_VARIANTS * VARIANT_PASSES:
-                if self._first_object.is_set():
-                    return
-                self.variant_used = variant
-                _LOGGER.debug("p2p: asking for video, variant %s", variant)
-                for packet in control.video_start_variant(variant):
+            if not self._first_object.is_set():
+                for packet in control.video_start_packets():
                     conversation.send(packet)
-                try:
-                    await asyncio.wait_for(self._first_object.wait(), VARIANT_WAIT)
-                except TimeoutError:
-                    continue
         except Exception as err:  # noqa: BLE001 - a failed start ends the session
             self._fail(err)
 

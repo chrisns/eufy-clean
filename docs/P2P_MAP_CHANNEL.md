@@ -28,7 +28,7 @@ Code: `custom_components/robovac_mqtt/api/p2p/` (transport and decoding) and
 ```
 TCP 6668, Tuya protocol 3.3 (frames encrypted with the local key)
   command type 32 = signaling: SDP offer/answer + ICE candidates
-    the SDP carries  a=aes-key:<32 hex>  = the session key, CHOSEN BY THE OFFERER
+    the SDP carries  a=aes-key:<32 hex>  = the reserved cloud session media key
 
 UDP on the LAN, client <-> device
   STUN/ICE (short-term creds), then KCP segments
@@ -143,7 +143,9 @@ Path points are 5 bytes: `x i16 BE | y i16 BE | flags` (cm). Flags low nibble:
 ## Initiation recipe
 
 1. Open TCP 6668, protocol 3.3, local key.
-2. Generate the AES media key, ICE ufrag/pwd, a `sessionid`/`trace_id`.
+2. Fetch a fresh RTC config and adopt its reserved AES key, ICE credentials,
+   session id, trace id and uid. Reject malformed identities instead of generating
+   a local replacement.
 3. Send a type-32 **offer** (no 3.3 header): our SDP (`a=aes-key`, `path:lan`),
    `msg` with `token`/`tcp_token`/`log` from the RTC config. The device answers
    and echoes our key.
@@ -164,7 +166,11 @@ The DP 181 state-set request needs
 `setting{mgrState{passEn: Switch{value: true}}}`. An extra message wrapper is
 acknowledged successfully but leaves `passEn` false. After authenticating the P2P
 control channel, set `passEn`, send `StreamOpen`, then send the video-start burst.
-A failed stream-open acknowledgement is advisory; the start requests still run.
+A failed stream-open acknowledgement is advisory; the proven HD start still runs.
+The HD burst is sent once; unverified startup variants are retained only in the
+[review notes](REVIEW_AND_VALIDATION.md). The session has a 30-second startup
+allowance, and decoded-frame gaps are limited to ten seconds. Expired frames are
+not returned while a session is recovering.
 
 Use HD clarity (`IOCtrl` command 9, channel 0, value 4) before the video starts.
 With SD clarity (value 2), captures on this robot omitted periodic IDR keyframes:
@@ -178,7 +184,7 @@ The S1 Pro also needs the V2 remote-control envelope on DP 155:
 length prefix. The older `RemoteCtrl{direction}` is acknowledged but does not
 move this robot. Keep the `normal` sub-message present for BRAKE (value 0).
 The iOS descriptor confirms method field 1, normal field 2, and its value field 1;
-a bounded V2 turn changed the live HA camera view. Other models retain the older
+two bounded three-second V2 turns through HA visibly rotated the live camera view. Other models retain the older
 message until their protocol has been verified.
 
 ## The cloud config is single-use
@@ -220,3 +226,8 @@ acknowledged but did nothing outside a firmware update.
 Trusted-LAN only, like the rest of the local Tuya transport. The local key and
 `device_password` are secrets; never log them. Opening the session is what the
 app does on its map view; it does not move the robot.
+
+## Validation and historical experiments
+
+See [REVIEW_AND_VALIDATION.md](REVIEW_AND_VALIDATION.md) for measured results,
+limits, discarded startup variants, regression fixes and the existing captures.

@@ -106,6 +106,16 @@ class RobotVideo:
     def frame_age(self) -> float | None:
         return time.monotonic() - self._frame_at if self._frame is not None else None
 
+    def _fresh_frame(self) -> bytes | None:
+        if (
+            self._coordinator.data.camera_enabled is True
+            and self._coordinator.data.status_code == WORK_STATE_REMOTE_CTRL
+            and self._frame is not None
+            and time.monotonic() - self._frame_at < _STALL_SECONDS
+        ):
+            return self._frame
+        return None
+
     @asynccontextmanager
     async def hold(self) -> AsyncIterator[RobotVideo]:
         """Keep the stream open for the duration of the ``async with`` block."""
@@ -132,19 +142,22 @@ class RobotVideo:
         """Return a fresh JPEG, waiting for the first one if the stream is starting."""
         deadline = time.monotonic() + timeout
         while True:
-            if self._coordinator.data.status_code != WORK_STATE_REMOTE_CTRL:
+            if (
+                self._coordinator.data.camera_enabled is not True
+                or self._coordinator.data.status_code != WORK_STATE_REMOTE_CTRL
+            ):
                 return None
-            if self._frame is not None and time.monotonic() - self._frame_at < _STALL_SECONDS:
-                return self._frame
+            if (frame := self._fresh_frame()) is not None:
+                return frame
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not self.streaming:
-                return self._frame  # stale, or None if nothing ever arrived
+                return None
             self._frame_event.clear()
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._frame_event.wait(), remaining)
 
     async def latest(self) -> bytes | None:
-        return self._frame if self._coordinator.data.status_code == WORK_STATE_REMOTE_CTRL else None
+        return self._fresh_frame()
 
     async def stop(self) -> None:
         self._cancel_linger()
@@ -195,6 +208,7 @@ class RobotVideo:
                     await asyncio.wait_for(self._kick.wait(), delay)
                 self._cooling_down = False
         finally:
+            self._cooling_down = False
             await self._close_robot_stream()
             self._frame = None
             self._frame_event.set()
@@ -220,7 +234,25 @@ class RobotVideo:
             feed.release_slot()
 
     async def _stream_in_slot(self, feed: P2PMapFeed) -> None:
+        self._frame = None  # a new session must not serve the previous session's image
         rtc = await feed.get_rtc()
+        stdin: asyncio.StreamWriter | None = None
+
+        def write_nal(nal: bytes) -> None:
+            if stdin is not None and not stdin.is_closing():
+                stdin.write(nal)
+
+        # Validate the reserved session before launching a decoder process.
+        session = VideoSession(
+            host=feed.host,
+            local_key=feed.local_key,
+            device_id=feed.device_id,
+            device_password=rtc["device_password"],
+            ice_config=rtc.get("ice_config"),
+            cloud_session=rtc.get("session") or {},
+            open_stream=self._open_robot_stream,
+            on_nal=write_nal,
+        )
         ffmpeg = await asyncio.create_subprocess_exec(
             _ffmpeg_binary(self._hass),
             *FFMPEG_ARGS,
@@ -230,16 +262,6 @@ class RobotVideo:
         )
         assert ffmpeg.stdin is not None and ffmpeg.stdout is not None
         stdin = ffmpeg.stdin
-        session = VideoSession(
-            host=feed.host,
-            local_key=feed.local_key,
-            device_id=feed.device_id,
-            device_password=rtc["device_password"],
-            ice_config=rtc.get("ice_config"),
-            cloud_session=rtc.get("session"),
-            open_stream=self._open_robot_stream,
-            on_nal=lambda nal: None if stdin.is_closing() else stdin.write(nal),
-        )
         self.sessions += 1
         reader = asyncio.ensure_future(self._read_frames(ffmpeg.stdout))
         watchdog = asyncio.ensure_future(self._watch_stall(session.connect_timeout))
@@ -252,6 +274,7 @@ class RobotVideo:
             for task in (runner, reader, watchdog):
                 task.cancel()
             await session.close()
+            await asyncio.gather(runner, reader, watchdog, return_exceptions=True)
             with suppress(Exception):
                 stdin.close()
             with suppress(ProcessLookupError):
@@ -276,13 +299,14 @@ class RobotVideo:
         raise P2PError("the video decoder stopped")
 
     async def _watch_stall(self, first_frame_allowance: float) -> None:
-        """End the stream if no frame arrives: the session gets as long as it needs to
-        walk its start variants for the first frame, then ``_STALL_SECONDS`` between."""
+        """Allow the session timeout for its first frame, then bound decoded-frame gaps."""
         started = time.monotonic()
         while True:
             await asyncio.sleep(1)
             if self._coordinator.data.status_code != WORK_STATE_REMOTE_CTRL:
                 raise HomeAssistantError("Manual control ended; closing the robot camera")
+            if self._coordinator.data.camera_enabled is not True:
+                raise HomeAssistantError("The robot camera was switched off; closing its stream")
             idle = time.monotonic() - max(self._frame_at, started)
             allowance = first_frame_allowance if self._frame_at < started else _STALL_SECONDS
             if idle > allowance:

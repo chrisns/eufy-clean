@@ -243,7 +243,7 @@ def _conversation(conv_id=kcp.CONV_MAP, on_message=None):
 
 def _deliver(datagrams, conversation):
     for datagram in datagrams:
-        for segment in kcp.parse_datagram(datagram):
+        for segment in kcp.parse_datagram(datagram, _KEY):
             conversation.input(segment)
 
 
@@ -507,9 +507,37 @@ async def test_session_fails_cleanly_when_the_robot_is_unreachable(monkeypatch):
         device_password="pw",
         on_object=lambda *_: None,
         host_ip="127.0.0.1",
+        cloud_session={"sessionId": "test", "iceUfrag": "test", "icePassword": "password",
+                       "aesKey": "00" * 16, "traceId": "test", "uid": "test"},
     )
     with pytest.raises((P2PError, OSError)):
         await session.run()
     assert not session.connected
     assert udp.closed
     assert session._host == "192.168.1.50"  # noqa: SLF001 - resolved for ICE matching
+
+
+@pytest.mark.parametrize("kind", ["header", "payload", "tag", "truncated"])
+def test_corrupt_push_segments_are_rejected_before_delivery(kind):
+    raw = bytearray(kcp.build_segment(_KEY, kcp.CONV_MAP, kcp.CMD_PUSH, 0, 0, 0, 0, b"payload"))
+    if kind == "truncated":
+        raw = raw[:-1]
+    else:
+        offset = {"header": 16, "payload": kcp.HEADER_LENGTH, "tag": -1}[kind]
+        raw[offset] ^= 1
+    assert not kcp.parse_datagram(bytes(raw), _KEY)
+
+
+def test_a_new_map_discards_previous_geometry_rooms_and_motion():
+    decoder = P2PMapDecoder()
+    decoder.apply("map.bin.stream", _delimited(_outline_msg(bytes([2] * 12))))
+    decoder.apply("map.bin.stream", _delimited(_rooms_msg((0, "Old room"))))
+    decoder.apply("cleanPath.bin.stream", _path_obj([(1, 2, 0)]))
+    decoder.apply("navPath.bin", _pose_obj(1, 2, 100))
+    new_rooms = _rooms_msg((0, "New room"))
+    new_rooms.map_info.map_id = 2
+    changed = decoder.apply("map.bin.stream", _delimited(new_rooms))
+    assert {CHANGED_MAP, CHANGED_ROOMS} <= changed
+    assert decoder.state.map_id == 2 and not decoder.state.has_map
+    assert decoder.state.rooms[0]["name"] == "New room"
+    assert not decoder.state.path and decoder.state.pose is None

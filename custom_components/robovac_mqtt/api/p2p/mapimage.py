@@ -57,7 +57,6 @@ def build_overlay(
     *,
     robot_status: str | None = None,
     robot_style: str = "googly",
-    show_path: bool = True,
     docked: bool = False,
 ) -> MapOverlay:
     """Project the dynamic parts of ``state`` (pose, path, obstacles) onto ``md``."""
@@ -75,7 +74,7 @@ def build_overlay(
         robot_status=robot_status,
         robot_style=robot_style,
         dock=world_to_grid(md, dock.x, dock.y) if dock is not None else None,
-        path=[(*world_to_grid(md, x, y), flags) for x, y, flags in state.path] if show_path else [],
+        path=[(*world_to_grid(md, x, y), flags) for x, y, flags in state.path],
         obstacles=[
             (*world_to_grid(md, *o.points[0]), o.object_type) for o in state.obstacles if o.points
         ],

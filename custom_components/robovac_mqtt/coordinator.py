@@ -314,8 +314,8 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         self.p2p.start()
 
     def _robot_is_moving(self) -> bool:
-        # While it is being driven by hand the robot refuses every P2P session
-        # (and a stream of refused attempts only upsets it), so leave it alone.
+        # Manual control is reserved for camera viewing; do not keep reopening
+        # map sessions as though it were an automated clean.
         return (
             self.data.activity in ("cleaning", "returning")
             and self.data.status_code != WORK_STATE_REMOTE_CTRL
@@ -332,7 +332,10 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         state = self.p2p.state
         if changed & {CHANGED_MAP, CHANGED_ROOMS, CHANGED_ZONES}:
             self._map_data = build_map_data(state)
-        if CHANGED_ROOMS in changed and state.rooms:
+            if self._map_data is None:
+                self.map_image = None
+                async_dispatcher_send(self.hass, f"{DOMAIN}_{self.device_id}_map_updated")
+        if CHANGED_ROOMS in changed:
             rooms = [{"id": r["id"], "name": r["name"] or f"Room {r['id'] + 1}"} for r in state.rooms]
             if rooms != self.data.rooms or state.map_id != self.data.map_id:
                 self.async_set_updated_data(
@@ -781,7 +784,7 @@ class EufyCleanCoordinator(DataUpdateCoordinator[VacuumState]):
         robot_style = opts.get(CONF_ROBOT_STYLE, DEFAULT_ROBOT_STYLE)
         map_data = self._map_data
         robot_status = self._get_robot_status()
-        at_dock = self.data.activity in ("docked", "idle") or bool(self.data.charging)
+        at_dock = self.data.activity == "docked" or bool(self.data.charging)
 
         if self.p2p is not None and self.p2p.state.has_map:
             overlay = build_overlay(

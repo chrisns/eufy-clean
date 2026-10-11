@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import secrets
 import socket
@@ -32,7 +31,6 @@ from .streams import StreamReassembler
 _LOGGER = logging.getLogger(__name__)
 
 ROBOT_PORT = 6668
-_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _DEFAULT_LOG = {"api": "thing.m.rtc.log", "interval": 60, "size": 1024, "level": 2, "topic": "/av/moto/log"}
 
 _CONNECT_TIMEOUT = 20.0  # offer -> first complete stream object
@@ -59,10 +57,6 @@ class P2PRefused(P2PError):
 REFUSAL_REASONS = (4, 12)
 
 
-def _random(length: int) -> str:
-    return "".join(secrets.choice(_ALNUM) for _ in range(length))
-
-
 def _build_offer_sdp(session_id: str, ufrag: str, password: str, aes_key_hex: str, cname: str) -> str:
     return "\r\n".join(
         (
@@ -85,31 +79,6 @@ def _build_offer_sdp(session_id: str, ufrag: str, password: str, aes_key_hex: st
             "",
         )
     )
-
-
-def _adopt_cloud_session(session: P2PSession, cloud: dict[str, Any]) -> bool:
-    """Take the session identity the cloud reserved on the robot (see ``get_rtc_config``).
-
-    Opening a session with anything else leaves that reservation unused, and the
-    robot only has a handful of slots.
-    """
-    try:
-        media_key = bytes.fromhex(cloud["aesKey"])
-        if len(media_key) != 16:
-            return False
-        session_id, ufrag, pwd = cloud["sessionId"], cloud["iceUfrag"], cloud["icePassword"]
-    except (KeyError, TypeError, ValueError):
-        return False
-    if not all(isinstance(v, str) and v for v in (session_id, ufrag, pwd)):
-        return False
-    session._media_key = media_key  # pylint: disable=protected-access
-    session._session_id = session_id  # pylint: disable=protected-access
-    session._ufrag, session._ice_pwd = ufrag, pwd  # pylint: disable=protected-access
-    if cloud.get("traceId"):
-        session._trace_id = cloud["traceId"]  # pylint: disable=protected-access
-    if cloud.get("uid"):
-        session._user_id = cloud["uid"]  # pylint: disable=protected-access
-    return True
 
 
 def local_ip_towards(host: str) -> str:
@@ -138,10 +107,9 @@ class P2PSession:
         device_id: str,
         device_password: str,
         on_object: Callable[[str, bytes], None],
+        cloud_session: dict[str, Any],
         ice_config: dict[str, Any] | None = None,
-        user_id: str = "homeassistant",
         host_ip: str | None = None,
-        cloud_session: dict[str, Any] | None = None,
     ) -> None:
         self._host = host
         self._local_key = local_key
@@ -149,16 +117,22 @@ class P2PSession:
         self._device_id = device_id
         self._device_password = device_password
         self._ice = ice_config or {}
-        self._user_id = user_id
         self._on_object = on_object
         self._host_ip = host_ip
 
-        self._media_key = os.urandom(16)
-        self._ufrag, self._ice_pwd = _random(4), _random(24)
-        self._session_id = f"{device_id}{int(time.time())}{_random(8)}"
-        self._trace_id = f"ipc_p2p_ios_{device_id}_{int(time.time())}000"
-        if cloud_session and _adopt_cloud_session(self, cloud_session):
-            _LOGGER.debug("p2p: using the cloud-issued session %s", self._session_id)
+        # A locally invented identity leaves the cloud reservation unused.
+        try:
+            self._media_key = bytes.fromhex(cloud_session["aesKey"])
+            self._session_id, self._ufrag, self._ice_pwd, self._trace_id, self._user_id = (
+                cloud_session[key] for key in ("sessionId", "iceUfrag", "icePassword", "traceId", "uid")
+            )
+            if len(self._media_key) != 16 or not all(
+                isinstance(v, str) and v
+                for v in (self._session_id, self._ufrag, self._ice_pwd, self._trace_id, self._user_id)
+            ):
+                raise ValueError("invalid session identity")
+        except (KeyError, TypeError, ValueError) as err:
+            raise P2PError("RTC config has no usable cloud-issued session") from err
 
         self._robot_ufrag: str | None = None
         self._robot_pwd: bytes | None = None
@@ -221,6 +195,7 @@ class P2PSession:
             ]
             opened = asyncio.ensure_future(self._first_object.wait())
             ended = asyncio.ensure_future(self._closed.wait())
+            tasks.extend((opened, ended))
             done, _ = await asyncio.wait(
                 {opened, ended}, timeout=self.connect_timeout, return_when=asyncio.FIRST_COMPLETED
             )
@@ -242,6 +217,7 @@ class P2PSession:
             self._closed.set()
             for task in tasks:
                 task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await self._say_goodbye()
             self._shutdown()
 
@@ -371,7 +347,7 @@ class P2PSession:
                     self._send_consent(nominate=True)
                     asyncio.get_running_loop().call_later(0.3, self._send_control_burst)
             return
-        segments = kcp.parse_datagram(datagram)
+        segments = kcp.parse_datagram(datagram, self._media_key)
         if not segments:
             _LOGGER.debug("p2p: unrecognised datagram (%d bytes) %s", len(datagram), datagram[:48].hex())
         for segment in segments:
@@ -384,6 +360,8 @@ class P2PSession:
             self._send_udp(stun.binding_request(self._ufrag, self._robot_ufrag, self._robot_pwd, nominate))
 
     def _send_control_burst(self) -> None:
+        if self._closed.is_set():
+            return
         control_conv = self._conversations[kcp.CONV_CONTROL]
         for packet in control.start_packets(self._device_password, self._local_key):
             control_conv.send(packet)

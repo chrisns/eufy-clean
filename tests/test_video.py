@@ -21,9 +21,6 @@ from custom_components.robovac_mqtt.api.commands import (
 from custom_components.robovac_mqtt.api.p2p import P2PError, P2PRefused, control, kcp
 from custom_components.robovac_mqtt.api.p2p.framing import CMD_RTC, decode_frames
 from custom_components.robovac_mqtt.api.p2p.video import (
-    STREAM_SETTLE,
-    VARIANT_PASSES,
-    VARIANT_WAIT,
     RtpHevcReader,
     VideoSession,
 )
@@ -52,6 +49,13 @@ from custom_components.robovac_mqtt.video_stream import (
 
 START = b"\x00\x00\x00\x01"
 SSRC = b"\x00\x00\x00\x0a"
+
+
+_CLOUD = {
+    "sessionId": "devid1700000000AbCdEfGh", "iceUfrag": "tEst", "icePassword": "FakeIcePassword0123456789",
+    "aesKey": "00112233445566778899aabbccddeeff", "traceId": "0123456789abcdef0123456789abcdef",
+    "uid": "eu0000000000000test",
+}
 
 
 def rtp(seq: int, payload: bytes, *, marker: bool = False, first_byte: int = 0x80) -> bytes:
@@ -132,7 +136,7 @@ def test_garbage_before_the_first_frame_is_skipped():
 
 
 def test_video_start_packets_are_auth_hello_caps_and_three_iocontrols():
-    packets = control.video_start_packets("pw", "k" * 16)
+    packets = control.video_prelude_packets("pw", "k" * 16) + control.video_start_packets()
     assert len(packets) == 6
     assert packets[0] == control.start_packets("pw", "k" * 16)[0]  # same auth packet
     parsed = [control.parse(p) for p in packets[1:]]
@@ -147,7 +151,7 @@ def test_video_session_hands_nal_units_out_and_counts_as_connected():
     seen: list[bytes] = []
     session = VideoSession(
         on_nal=seen.append, host="127.0.0.1", local_key="k" * 16,
-        device_id="dev", device_password="pw",
+        device_id="dev", device_password="pw", cloud_session=_CLOUD,
     )
     assert set(session._extra_conversations()) == {kcp.CONV_VIDEO}
     unit = nal(32, b"vps")
@@ -409,7 +413,7 @@ class _FakeWriter:
 def _session() -> VideoSession:
     return VideoSession(
         on_nal=lambda _nal: None, host="127.0.0.1", local_key="k" * 16,
-        device_id="dev", device_password="pw",
+        device_id="dev", device_password="pw", cloud_session=_CLOUD,
     )
 
 
@@ -468,12 +472,6 @@ def test_ffmpeg_turns_an_h265_stream_into_jpegs():
 
 # -- the cloud's pre-session ------------------------------------------------------
 
-_CLOUD = {
-    "sessionId": "devid1700000000AbCdEfGh", "iceUfrag": "tEst", "icePassword": "FakeIcePassword0123456789",
-    "aesKey": "00112233445566778899aabbccddeeff", "traceId": "0123456789abcdef0123456789abcdef",
-    "uid": "eu0000000000000test",
-}
-
 
 def test_a_session_adopts_the_session_the_cloud_reserved_on_the_robot():
     session = VideoSession(
@@ -487,12 +485,12 @@ def test_a_session_adopts_the_session_the_cloud_reserved_on_the_robot():
 
 
 @pytest.mark.parametrize("bad", [{}, {"aesKey": "zz"}, {**_CLOUD, "aesKey": "00"}, {**_CLOUD, "sessionId": None}])
-def test_an_unusable_cloud_session_falls_back_to_a_generated_one(bad):
-    session = VideoSession(
-        on_nal=lambda _n: None, host="127.0.0.1", local_key="k" * 16, device_id="dev",
-        device_password="pw", cloud_session=bad,
-    )
-    assert session._session_id.startswith("dev") and session._media_key != bytes.fromhex(_CLOUD["aesKey"])
+def test_an_unusable_cloud_session_is_rejected_without_inventing_an_identity(bad):
+    with pytest.raises(P2PError, match="cloud-issued session"):
+        VideoSession(
+            on_nal=lambda _n: None, host="127.0.0.1", local_key="k" * 16, device_id="dev",
+            device_password="pw", cloud_session=bad,
+        )
 
 
 @pytest.mark.asyncio
@@ -521,7 +519,7 @@ class _Conversation:
 def _video_session(open_stream=None) -> tuple[VideoSession, _Conversation]:
     session = VideoSession(
         on_nal=lambda _n: None, open_stream=open_stream, host="127.0.0.1",
-        local_key="k" * 16, device_id="dev", device_password="pw",
+        local_key="k" * 16, device_id="dev", device_password="pw", cloud_session=_CLOUD,
     )
     conversation = _Conversation()
     session._conversations = {kcp.CONV_CONTROL: conversation}  # type: ignore[dict-item]
@@ -530,7 +528,6 @@ def _video_session(open_stream=None) -> tuple[VideoSession, _Conversation]:
 
 @pytest.mark.asyncio
 async def test_the_stream_is_opened_after_the_prelude_and_before_any_video_start(monkeypatch):
-    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 0.01)
     monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.STREAM_SETTLE", 0.01)
     order: list[str] = []
     session, conversation = _video_session()
@@ -545,30 +542,24 @@ async def test_the_stream_is_opened_after_the_prelude_and_before_any_video_start
 
 
 @pytest.mark.asyncio
-async def test_every_start_variant_is_tried_in_order_twice_when_no_video_arrives(monkeypatch):
-    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 0.01)
-    session, conversation = _video_session()
+async def test_only_the_verified_start_sequence_is_sent_once(monkeypatch):
+    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.STREAM_SETTLE", 0.01)
+    session, conversation = _video_session(open_stream=AsyncMock())
     await session._start_video()
-    one_pass = [p for v in control.VIDEO_START_VARIANTS for p in control.video_start_variant(v)]
-    expected = one_pass * 2
-    assert conversation.sent[3:] == expected
-    assert session.variant_used == control.VIDEO_START_VARIANTS[-1]
+    assert conversation.sent[3:] == control.video_start_packets()
 
 
 @pytest.mark.asyncio
-async def test_no_further_variants_are_sent_once_video_flows(monkeypatch):
-    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 1.0)
+async def test_no_start_request_is_sent_when_video_already_flows():
     session, conversation = _video_session()
     session._first_object.set()
     await session._start_video()
     assert len(conversation.sent) == 3  # only the prelude
-    assert session.variant_used is None
 
 
 @pytest.mark.asyncio
 async def test_a_refused_stream_open_does_not_stop_the_video_start(monkeypatch):
     """The stream-open is advisory: a session that ignored its refusal still got video from a real robot."""
-    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 0.01)
     monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.STREAM_SETTLE", 0.01)
 
     async def refuse():
@@ -576,21 +567,8 @@ async def test_a_refused_stream_open_does_not_stop_the_video_start(monkeypatch):
 
     session, conversation = _video_session(open_stream=refuse)
     await session._start_video()
-    assert len(conversation.sent) > 3  # the start variants were sent regardless
+    assert len(conversation.sent) > 3  # the verified start was sent regardless
     assert session._failure is None
-
-
-def test_the_first_variant_is_the_one_proven_on_a_real_robot():
-    assert control.VIDEO_START_VARIANTS[0] == "b"
-    assert [(control.parse(p).type, control.parse(p).sub_command) for p in control.video_start_variant("b")] == [
-        (0x10002, 9), (0x10003, 6), (0x10004, 0x40006),
-    ]
-
-
-def test_the_session_waits_long_enough_for_every_pass_of_the_ladder():
-    session, _ = _video_session()
-    ladder = VARIANT_WAIT * VARIANT_PASSES * len(control.VIDEO_START_VARIANTS)
-    assert session.connect_timeout > STREAM_SETTLE + ladder
 
 
 # -- refusals ---------------------------------------------------------------------
@@ -719,3 +697,21 @@ async def test_manual_mode_is_allowed_even_when_ha_calls_its_activity_cleaning(v
     with pytest.raises(HomeAssistantError, match="busy with the map"):
         await video._stream_once()
     coordinator.p2p.acquire_slot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_expired_frames_are_not_served_after_decoder_failure(video):
+    video._frame, video._frame_at = b"old jpeg", time.monotonic() - 60
+    assert await video.latest() is None
+    assert await video.wait_for_frame(timeout=0) is None
+
+
+@pytest.mark.asyncio
+async def test_turning_the_physical_camera_off_blocks_cached_images_and_stops_watchdog(video, coordinator, monkeypatch):
+    video._frame, video._frame_at = b"jpeg", time.monotonic()
+    coordinator.data = VacuumState(camera_enabled=False, status_code=WORK_STATE_REMOTE_CTRL)
+    assert await video.latest() is None
+    assert await video.wait_for_frame(timeout=0) is None
+    monkeypatch.setattr("custom_components.robovac_mqtt.video_stream.asyncio.sleep", AsyncMock())
+    with pytest.raises(HomeAssistantError, match="switched off"):
+        await video._watch_stall(20)

@@ -448,3 +448,21 @@ async def test_listener_dispatches_dps_carried_by_a_heartbeat_reply(patch_tinytu
         await _drive_until(done, client)
 
     assert any(json.loads(json.loads(r)["payload"])["data"] == {"160": True} for r in received)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_write_holds_socket_lock_until_executor_finishes(patch_tinytuya, fake_dev):
+    client = LocalTuyaClient(device_id="dev1", local_key="k" * 16, host="1.2.3.4")
+    client._dev = fake_dev
+    pending = asyncio.get_running_loop().create_future()
+    client._loop = MagicMock()
+    client._loop.run_in_executor.return_value = pending
+    write = asyncio.create_task(client.send_command({"155": "brake"}, wait=False))
+    await asyncio.sleep(0)
+    write.cancel()
+    await asyncio.sleep(0)
+    assert client._dev_lock.locked() and not pending.cancelled()
+    pending.set_result(None)
+    with pytest.raises(asyncio.CancelledError):
+        await write
+    assert not client._dev_lock.locked()

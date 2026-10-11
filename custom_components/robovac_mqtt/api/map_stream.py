@@ -11,7 +11,7 @@ from typing import Any
 
 from ..proto.cloud import stream_pb2
 from ..utils import decode_varint
-from .map_render import MAX_ROOM_ID
+from .map_render import MAX_MAP_PIXELS, MAX_ROOM_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,32 +88,46 @@ def _hex_to_proto_bytes(hex_data: str) -> bytes:
 
 
 def _lz4_block_decompress(data: bytes, uncompressed_size: int) -> bytes:
+    """Decode one LZ4 block, enforcing its declared size and valid backreferences."""
+    if not 0 <= uncompressed_size <= MAX_MAP_PIXELS:
+        raise ValueError("decompressed map exceeds the pixel limit")
     output = bytearray()
     pos = 0
-    n = len(data)
-    while pos < n:
-        token = data[pos]; pos += 1
-        lit_len = (token >> 4) & 0xF
-        if lit_len == 15:
-            while pos < n:
-                extra = data[pos]; pos += 1
-                lit_len += extra
+
+    def length(value: int) -> int:
+        nonlocal pos
+        if value == 15:
+            while True:
+                if pos >= len(data):
+                    raise ValueError("truncated LZ4 length")
+                extra = data[pos]
+                pos += 1
+                value += extra
                 if extra != 255:
                     break
-        output.extend(data[pos: pos + lit_len]); pos += lit_len
-        if pos >= n:
+        return value
+
+    while pos < len(data):
+        token = data[pos]
+        pos += 1
+        literal = length(token >> 4)
+        if pos + literal > len(data) or len(output) + literal > uncompressed_size:
+            raise ValueError("invalid LZ4 literal length")
+        output.extend(data[pos : pos + literal])
+        pos += literal
+        if pos == len(data):
             break
-        offset = data[pos] | (data[pos + 1] << 8); pos += 2
-        match_len = (token & 0xF) + 4
-        if (token & 0xF) == 15:
-            while pos < n:
-                extra = data[pos]; pos += 1
-                match_len += extra
-                if extra != 255:
-                    break
-        match_start = len(output) - offset
-        for i in range(match_len):
-            output.append(output[match_start + i])
+        if pos + 2 > len(data):
+            raise ValueError("truncated LZ4 offset")
+        offset = int.from_bytes(data[pos : pos + 2], "little")
+        pos += 2
+        match = length(token & 0xF) + 4
+        if not 0 < offset <= len(output) or len(output) + match > uncompressed_size:
+            raise ValueError("invalid LZ4 match")
+        for _ in range(match):
+            output.append(output[-offset])
+    if len(output) != uncompressed_size:
+        raise ValueError("LZ4 output does not match its declared size")
     return bytes(output)
 
 

@@ -34,6 +34,7 @@ from PIL import Image, ImageDraw, ImageFont
 if TYPE_CHECKING:
     from .map_stream import MapData
 
+MAX_MAP_PIXELS = 4000 * 4000
 MAX_ROOM_ID = 31  # room outline ids 0-31 are rooms; 60-63 are special
 _MAX_SUPERSAMPLED_PX = 4096
 _SUPERSAMPLE = 2
@@ -255,7 +256,7 @@ def render_map(
     w, h = md.width, md.height
     if w <= 0 or h <= 0:
         raise ValueError("map has no size")
-    if w * h > 4000 * 4000:
+    if w * h > MAX_MAP_PIXELS:
         raise ValueError(f"Map dimensions {w}x{h} exceed safety limit (max 4000x4000)")
 
     out_scale = max_px / max(w, h)

@@ -117,7 +117,7 @@ def build_remote_move_command(direction: str, *, v2: bool = False) -> dict[str, 
     """Drive the robot by hand (DPS 155 ``RemoteCtrl``).
 
     ``v2`` selects the S1 Pro normal-direction envelope; older models use RemoteCtrl.
-    Any direction enters remote-control mode; the robot keeps moving only while
+    Enable manual control before driving. The robot keeps moving only while
     the command is repeated (the app resends every 500 ms), and ``brake`` stops
     it without leaving the mode. Unknown directions build nothing.
     """

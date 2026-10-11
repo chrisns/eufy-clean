@@ -1,6 +1,8 @@
 """Unit tests for api/map_stream.py: protocol parsing, LZ4 decompression, map render."""
 import json
 
+import pytest
+
 from custom_components.robovac_mqtt.api.map_stream import (
     _lz4_block_decompress,
     parse_biz_protocol41,
@@ -178,3 +180,9 @@ def test_map_description_strips_whitespace():
         6,
         "The main floor",
     )
+
+
+@pytest.mark.parametrize(("data", "size"), [(b"\x50ABC", 5), (b"\x11Z\x00\x00", 6), (b"\x11Z\x01\x00", 5), (b"\xf0", 1), (b"", 1)])
+def test_lz4_rejects_truncation_invalid_offsets_and_size_mismatches(data, size):
+    with pytest.raises(ValueError):
+        _lz4_block_decompress(data, size)

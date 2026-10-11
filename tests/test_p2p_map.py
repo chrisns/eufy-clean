@@ -22,6 +22,10 @@ from custom_components.robovac_mqtt.api.p2p.mapdata import (
     P2PMap,
     Pose,
 )
+from custom_components.robovac_mqtt.api.p2p.mapimage import (
+    build_map_data,
+    build_overlay,
+)
 from custom_components.robovac_mqtt.camera import EufyMapCamera
 from custom_components.robovac_mqtt.coordinator import EufyCleanCoordinator
 from custom_components.robovac_mqtt.p2p_map import P2PMapFeed
@@ -155,7 +159,7 @@ def test_feed_dump_restore_roundtrip(hass):
         docks=[Pose(1, -29, 157)],
         outline=bytes(range(12)),
         rooms=[{"id": 0, "name": "Kitchen", "order": 1, "scene": 0}],
-        obstacles=[Obstacle("Shoe", ((5, 6),), photo_id="p1")],
+        obstacles=[Obstacle("Shoe", ((5, 6),))],
         virtual_walls=[((1, 2), (3, 4))],
         forbidden_zones=[[(0, 0), (1, 0), (1, 1), (0, 1)]],
         path=[(-277, 1163, 0x12), (3, 58, 4)],
@@ -322,50 +326,34 @@ async def test_no_config_is_fetched_when_the_robot_is_unreachable(hass, fake_ses
 
 
 @pytest.mark.asyncio
-async def test_repeated_quick_failures_trigger_a_long_cooldown(hass, fake_session):
-    """Each failed attempt wastes a reserved slot, so stop trying for a while."""
-    fake_session.script = [OSError("refused")] * 10
-    waits: list[float] = []
-    real_wait_for = asyncio.wait_for
+@pytest.mark.parametrize(("error", "failures", "cooldown"), [
+    (OSError("unreachable"), 3, p2p_map._FAILURE_COOLDOWN),
+    (P2PRefused("robot sent disconnect"), 1, p2p_map._REFUSAL_COOLDOWN),
+])
+async def test_activity_changes_cannot_bypass_failure_cooldowns(hass, fake_session, error, failures, cooldown):
+    fake_session.script = [error] * 10
+    waiting = asyncio.Event()
+    release = asyncio.Event()
+    real_sleep = asyncio.sleep
 
-    async def spy(awaitable, timeout=None):
-        if timeout is not None and timeout > 1:
-            waits.append(timeout)
-        return await real_wait_for(awaitable, 0.01)
+    async def sleep(delay):
+        if delay >= cooldown:
+            waiting.set()
+            await release.wait()
+        else:
+            await real_sleep(delay)
 
-    with (
-        patch.object(p2p_map, "_ACTIVE_RETRY", 0.01),
-        patch.object(p2p_map.asyncio, "wait_for", spy),
-    ):
+    with patch.object(p2p_map, "_ACTIVE_RETRY", 0.001), patch.object(p2p_map.asyncio, "sleep", sleep):
         feed = _feed(hass, active=True)
         feed.start()
-        await _until(lambda: feed.failures >= 4)
-        await feed.stop()
-    assert p2p_map._FAILURE_COOLDOWN in waits
-
-
-@pytest.mark.asyncio
-async def test_a_refused_session_triggers_a_long_cooldown_after_just_one(hass, fake_session):
-    """Every further attempt at a refusing robot makes it refuse for longer."""
-    fake_session.script = [P2PRefused("robot sent disconnect")] * 5
-    waits: list[float] = []
-    real_wait_for = asyncio.wait_for
-
-    async def spy(awaitable, timeout=None):
-        if timeout is not None and timeout > 1:
-            waits.append(timeout)
-        return await real_wait_for(awaitable, 0.01)
-
-    with (
-        patch.object(p2p_map, "_ACTIVE_RETRY", 0.01),
-        patch.object(p2p_map.asyncio, "wait_for", spy),
-    ):
-        feed = _feed(hass, active=True)
-        feed.start()
-        await _until(lambda: feed.failures >= 1)
-        await _until(lambda: waits)
-        await feed.stop()
-    assert waits[0] == p2p_map._REFUSAL_COOLDOWN
+        try:
+            await asyncio.wait_for(waiting.wait(), 2)
+            feed.poke()
+            await real_sleep(0.01)
+            assert feed.failures == failures
+            assert feed._rtc_config.await_count == failures
+        finally:
+            await feed.stop()
 
 
 @pytest.mark.asyncio
@@ -406,3 +394,20 @@ async def test_the_camera_can_take_the_slot_from_a_long_running_map_session(hass
     assert feed.session_slot.locked() and fake_session.instances[0].closed
     feed.release_slot()
     await feed.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("activity", "charging", "docked"), [("idle", False, False), ("docked", False, True), ("idle", True, True)])
+async def test_idle_off_dock_uses_the_actual_pose(hass, activity, charging, docked):
+    coordinator = _local_coordinator(hass)
+    coordinator.data = replace(coordinator.data, activity=activity, charging=charging)
+    coordinator.p2p = _feed(hass)
+    coordinator.p2p.decoder.state = P2PMap(
+        map_id=1, width=4, height=3, outline=bytes([2] * 12),
+        pose=Pose(5, 5, 100), docks=[Pose(0, 0, 0)],
+    )
+    coordinator._map_data = build_map_data(coordinator.p2p.state)
+    coordinator._async_save_map_image = AsyncMock()
+    with patch("custom_components.robovac_mqtt.coordinator.build_overlay", wraps=build_overlay) as overlay:
+        await coordinator._async_rerender_map()
+    assert overlay.call_args.kwargs["docked"] is docked

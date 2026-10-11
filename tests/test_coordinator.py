@@ -683,7 +683,7 @@ def test_calibration_points_match_the_renderer(mock_hass, mock_login):
 
 
 def test_remote_control_is_not_treated_as_the_robot_moving_for_p2p():
-    """The robot refuses P2P while it is driven by hand; the map feed must leave it alone."""
+    """Manual control must not trigger the continuously moving map retry policy."""
 
     class _Stub:
         data = VacuumState(activity="cleaning", status_code=3)

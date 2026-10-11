@@ -1,6 +1,6 @@
 # Eufy Clean — Home Assistant Integration
 
-Full-featured Home Assistant custom component for Eufy robot vacuums. Controls cleaning scenes, individual rooms, dock station, and streams a live floor map — all over MQTT with no cloud polling.
+Full-featured Home Assistant custom component for Eufy robot vacuums. Controls cleaning scenes, individual rooms, dock station, and streams a live floor map — via MQTT, local Tuya or Tuya Cloud, with local P2P maps and camera video on supported robots.
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/jeppesens/eufy-clean)](https://github.com/jeppesens/eufy-clean/releases)
@@ -17,8 +17,8 @@ Full-featured Home Assistant custom component for Eufy robot vacuums. Controls c
 ---
 
 ## FAQ
-- Requires an MQTT-enabled Eufy vacuum (e.g. RoboVac X10 Pro Omni, C28 Omni, X9 Pro, L70, G50, and others — see supported models below)
-- Tested on X10 Pro Omni and C28 Omni; should work on other MQTT-capable models
+- Supports MQTT robots and Tuya-transport robots such as the S1 Pro — see the supported models and transport setup below.
+- Tested on X10 Pro Omni, C28 Omni and S1 Pro; available features depend on the model and transport.
 - Personal project maintained for Home Assistant users. Contributions welcome!
 
 > [!NOTE]
@@ -29,7 +29,7 @@ Full-featured Home Assistant custom component for Eufy robot vacuums. Controls c
 ## Features
 
 ### Live Floor Map Camera
-A live floor plan camera entity (`camera.<device>_map`) streams the robot's map in real time via MQTT. No Tuya developer account or additional credentials needed.
+A live floor plan camera entity (`camera.<device>_map`) streams the robot's map via MQTT or local P2P on Tuya robots. It uses the configured Eufy/Tuya account; no Tuya developer account is needed.
 
 ![Live floor map showing room colours, cleaning trail, and dock icon](images/map-screenshot.png)
 
@@ -38,18 +38,21 @@ A live floor plan camera entity (`camera.<device>_map`) streams the robot's map 
 - **Live robot position** — tracks position in two styles: orange with googly eyes (default) or plain dark dot
 - **Dock icon** — gold house icon marks the dock; robot snaps to it when docked
 - **Status badges** — coloured badge next to robot: lightning bolt (charging, disappears at 100%), water drop (washing), snowflake (drying), dust icon (emptying)
-- **Cleaning trail** — orange line traces the robot's path; clears on new session, survives HA restarts, preserved across brief auto-empty dock visits
+- **Cleaning trail** — a line traces the robot's path; clears on new session, survives HA restarts, preserved across brief auto-empty dock visits
 - **Persistent map** — map and room data saved to storage and restored on restart
 
 Map size (256/512/1024/2048 px) and robot marker style configurable via integration options.
 
 ### Robot Camera (S1 Pro)
-`camera.<device>_camera` shows the robot's own camera (H.265, 800x600 at about 10 fps) as a snapshot and an MJPEG stream, over the same local P2P channel as the map. Requires the local Tuya transport and an `ffmpeg` on the Home Assistant host (the stock container has one).
+`camera.<device>_camera` shows the robot's own camera (H.265, 800x600 at about 10 fps) as a snapshot and an MJPEG stream, over the same local P2P connection as the map. HA MJPEG is limited to about 5 fps. Requires the local Tuya transport and an `ffmpeg` on the Home Assistant host (the stock container has one).
 
 - **Switched on at the robot, never from Home Assistant.** The camera is off until you hold **Start/Pause** and **Recharge** together for 10 seconds on the robot. The integration only reads that switch (`binary_sensor.<device>_camera_enabled`); the camera entity is unavailable while it is off.
 - **Only streams while someone is looking.** The first viewer opens the stream, it stays warm for 20 seconds, and the last viewer to leave closes it again.
 - **Manual control must be enabled.** Start it with `vacuum.send_command` and `command: start_remote`; end it with `command: stop_remote`. The camera is unavailable outside manual control and never changes the mode itself. Leaving manual control closes the stream and prevents cached images from being returned.
+- **Stationary manual mode can expire after about a minute.** Viewing does not renew it. The map pauses while video owns the P2P session slot.
 - **Night views are dark.** There is no light on the robot.
+
+Measured results, existing screenshots and investigation notes: [review and validation](docs/REVIEW_AND_VALIDATION.md).
 
 ### Vacuum Control
 - **Start / Stop / Pause** cleaning operations
@@ -217,7 +220,7 @@ unavailable just because the LAN address has shifted.
 >
 > Verified end to end on the S1 Pro (T2080A). The channel is documented in
 > `docs/P2P_MAP_CHANNEL.md`. The P2P password comes from your Tuya Cloud session,
-> so the feed needs that login to succeed once; everything else (vacuum/mop mode,
+> so each new P2P connection needs a fresh cloud-issued session; everything else (vacuum/mop mode,
 > water level, spot/zone/room commands, station, consumables, lifetime stats)
 > works over both transports.
 

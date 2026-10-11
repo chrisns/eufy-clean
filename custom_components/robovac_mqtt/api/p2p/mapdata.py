@@ -36,19 +36,6 @@ from .streams import CLEAN_PATH_STREAM, MAP_STREAM, NAV_PATH_STREAM
 
 _LOGGER = logging.getLogger(__name__)
 
-# Room outline pixel: low 2 bits are the pixel type, high 6 bits the room id.
-# Ids 0-31 are rooms; 60 = no room data, 61 = gap between rooms, 62 = obstacle,
-# 63 = unknown (p2pdata.proto, MapPixels).
-MAX_ROOM_ID = 31
-
-# CompletePath point flags: low nibble = segment type, bit 4 = starts a new line.
-PATH_TYPE_SWEEP = 0
-PATH_TYPE_MOP = 1
-PATH_TYPE_SWEEP_MOP = 2
-PATH_TYPE_NAVIGATE = 3
-PATH_TYPE_GO_HOME = 4
-PATH_FLAG_NEW = 0x10
-
 # A runaway path (a corrupt length) must not grow without bound.
 _MAX_PATH_POINTS = 200_000
 
@@ -72,9 +59,6 @@ class Pose:
 class Obstacle:
     object_type: str
     points: tuple[tuple[int, int], ...]
-    theta: int = 0
-    photo_id: str = ""
-    accuracy: int = 0
 
 
 @dataclass(slots=True)
@@ -103,7 +87,6 @@ class P2PMap:
     ban_mop_zones: list[list[tuple[int, int]]] = field(default_factory=list)
     target_room_ids: list[int] = field(default_factory=list)
     target_zones: list[list[tuple[int, int]]] = field(default_factory=list)
-    target_point: tuple[int, int] | None = None
     path: list[tuple[int, int, int]] = field(default_factory=list)  # (x, y, flags)
     pose: Pose | None = None
 
@@ -179,9 +162,16 @@ class P2PMapDecoder:
         info = message.map_info
         s = self.state
         changed: set[str] = set()
+        if info.map_id != s.map_id:
+            # Room ids, targets and geometry belong to one map. A room update
+            # can precede its bitmap, so never combine it with the previous map.
+            s = self.state = P2PMap()
+            self._path_snapshot_pending = True
+            changed.add(CHANGED_ROOMS)
 
         geometry = (info.map_id, info.map_width, info.map_height, info.origin.x, info.origin.y)
         if geometry != (s.map_id, s.width, s.height, s.origin_x, s.origin_y):
+            s.outline = s.realtime = None
             s.map_id, s.width, s.height, s.origin_x, s.origin_y = geometry
             changed.add(CHANGED_MAP)
         docks = [Pose(d.x, d.y, d.theta) for d in info.docks]
@@ -220,9 +210,6 @@ class P2PMapDecoder:
                 Obstacle(
                     object_type=o.object_type,
                     points=tuple((p.x, p.y) for p in o.show_points),
-                    theta=o.theta,
-                    photo_id=o.photo_id,
-                    accuracy=o.accuracy,
                 )
                 for o in info.obstacles.obstacles
                 if not o.HasField("valid") or o.valid.value
@@ -242,13 +229,8 @@ class P2PMapDecoder:
             temp = info.temporary_data
             room_ids = [r.id for r in temp.select_rooms_clean.rooms]
             target_zones = [_quad(z.quadrangle) for z in temp.select_zones_clean.zones]
-            point = (
-                (temp.goto_location.destination.x, temp.goto_location.destination.y)
-                if temp.HasField("goto_location")
-                else None
-            )
-            if (room_ids, target_zones, point) != (s.target_room_ids, s.target_zones, s.target_point):
-                s.target_room_ids, s.target_zones, s.target_point = room_ids, target_zones, point
+            if (room_ids, target_zones) != (s.target_room_ids, s.target_zones):
+                s.target_room_ids, s.target_zones = room_ids, target_zones
                 changed.add(CHANGED_TARGET)
         return changed
 
@@ -258,7 +240,7 @@ class P2PMapDecoder:
         raw = message.path
         if message.path_lz4len and message.path_lz4len != len(raw):
             raw = _lz4_block_decompress(raw, message.path_lz4len)
-        points = decode_path(raw)
+        points = decode_path(raw)[-_MAX_PATH_POINTS:]
         s = self.state
         if self._path_snapshot_pending or not points:
             # A session's first path object is the full path; an empty one resets it.

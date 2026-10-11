@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -29,12 +31,13 @@ from homeassistant.helpers.issue_registry import (
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api.commands import build_command
+from .api.commands import REMOTE_DIRECTIONS, build_command
 from .const import (
     DOMAIN,
     EUFY_CLEAN_NOVEL_CLEAN_SPEED,
     LEGACY_CLEAN_SPEEDS,
     SCALAR_SUCTION_LEVELS,
+    WORK_STATE_REMOTE_CTRL,
 )
 from .coordinator import EufyCleanCoordinator
 
@@ -167,9 +170,7 @@ async def async_setup_entry(
     platform.async_register_entity_service(
         "remote_drive",
         {
-            vol.Required("direction"): vol.In(
-                ["forward", "back", "left", "right", "brake"]
-            ),
+            vol.Required("direction"): vol.In(list(REMOTE_DIRECTIONS)),
             vol.Optional("duration", default=1.0): vol.All(
                 vol.Coerce(float), vol.Range(min=0, max=_REMOTE_MAX_SECONDS)
             ),
@@ -212,6 +213,8 @@ class RoboVacMQTTEntity(CoordinatorEntity[EufyCleanCoordinator], StateVacuumEnti
         super().__init__(coordinator)
         self._attr_unique_id = coordinator.device_id
         self._config_entry = config_entry
+        self._remote_driving = False
+        self._remote_stop = asyncio.Event()
 
         self._attr_device_info = coordinator.device_info
 
@@ -511,22 +514,35 @@ class RoboVacMQTTEntity(CoordinatorEntity[EufyCleanCoordinator], StateVacuumEnti
         coordinator = self.coordinator
         if coordinator.api_type != "novel":
             raise HomeAssistantError("Manual drive needs a protobuf (novel) robot")
+        if direction not in REMOTE_DIRECTIONS or not math.isfinite(duration) or not 0 <= duration <= _REMOTE_MAX_SECONDS:
+            raise HomeAssistantError("Choose a valid direction and a finite duration between 0 and 10 seconds")
         if direction != "brake" and duration > 0:
+            if coordinator.data.status_code != WORK_STATE_REMOTE_CTRL:
+                raise HomeAssistantError("Enable manual control before driving the robot")
+            if self._remote_driving:
+                raise HomeAssistantError("A manual drive is already running; brake before starting another")
             command = coordinator.build_device_command("remote_move", direction=direction)
+            self._remote_driving = True
+            self._remote_stop.clear()
             try:
                 loop = asyncio.get_running_loop()
                 end = loop.time() + duration
-                while True:
+                while not self._remote_stop.is_set() and coordinator.data.status_code == WORK_STATE_REMOTE_CTRL:
                     await coordinator.async_send_command(command, wait=False)
                     if loop.time() + _REMOTE_REPEAT_SECONDS >= end:
                         break
-                    await asyncio.sleep(_REMOTE_REPEAT_SECONDS)
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(self._remote_stop.wait(), _REMOTE_REPEAT_SECONDS)
             finally:
-                await coordinator.async_send_command(
-                    coordinator.build_device_command("remote_move", direction="brake"),
-                    wait=False,
-                )
+                try:
+                    await coordinator.async_send_command(
+                        coordinator.build_device_command("remote_move", direction="brake"),
+                        wait=False,
+                    )
+                finally:
+                    self._remote_driving = False
             return
+        self._remote_stop.set()
         await coordinator.async_send_command(
             coordinator.build_device_command("remote_move", direction="brake"),
             wait=False,

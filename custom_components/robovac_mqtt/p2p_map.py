@@ -173,10 +173,15 @@ class P2PMapFeed:
                 delay = max(delay, _FAILURE_COOLDOWN)
             if refused:
                 delay = max(delay, _REFUSAL_COOLDOWN)
-            try:
-                await asyncio.wait_for(self._wake.wait(), delay)
-            except TimeoutError:
-                pass
+            if refused or self._failures_in_a_row >= _MAX_QUICK_FAILURES:
+                # Activity changes must not bypass the refusal cooldown and
+                # repeatedly reserve cloud sessions on a robot that rejects them.
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    await asyncio.wait_for(self._wake.wait(), delay)
+                except TimeoutError:
+                    pass
 
     async def acquire_slot(self, timeout: float) -> None:
         """Take the session slot for the camera, asking the map feed to hand it over.
@@ -208,7 +213,7 @@ class P2PMapFeed:
             device_id=self._device_id,
             device_password=rtc["device_password"],
             ice_config=rtc.get("ice_config"),
-            cloud_session=rtc.get("session"),
+            cloud_session=rtc.get("session") or {},
             on_object=self._on_object,
         )
         self.sessions += 1
@@ -249,7 +254,7 @@ class P2PMapFeed:
             "outline": base64.b64encode(s.outline).decode() if s.outline else None,
             "rooms": s.rooms,
             "obstacles": [
-                {"type": o.object_type, "points": [list(p) for p in o.points], "photo_id": o.photo_id}
+                {"type": o.object_type, "points": [list(p) for p in o.points]}
                 for o in s.obstacles
             ],
             "virtual_walls": [[list(a), list(b)] for a, b in s.virtual_walls],
@@ -278,7 +283,7 @@ class P2PMapFeed:
                 outline=base64.b64decode(data["outline"]) if data.get("outline") else None,
                 rooms=list(data.get("rooms", [])),
                 obstacles=[
-                    Obstacle(o["type"], tuple(tuple(p) for p in o["points"]), photo_id=o.get("photo_id", ""))
+                    Obstacle(o["type"], tuple(tuple(p) for p in o["points"]))
                     for o in data.get("obstacles", [])
                 ],
                 virtual_walls=[(tuple(a), tuple(b)) for a, b in data.get("virtual_walls", [])],

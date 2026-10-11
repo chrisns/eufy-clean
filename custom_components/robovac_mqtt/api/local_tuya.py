@@ -183,9 +183,20 @@ class LocalTuyaClient:
         # failure; we only care about exceptions.
         try:
             async with self._dev_lock:
-                await self._loop.run_in_executor(
+                write = self._loop.run_in_executor(
                     None, partial(self._dev.set_multiple_values, dps, nowait=not wait)
                 )
+                try:
+                    await asyncio.shield(write)
+                except asyncio.CancelledError:
+                    # Cancelling an await cannot stop its executor thread. Keep
+                    # the socket lock until the write finishes before a brake,
+                    # receiver or disconnect can use the non-thread-safe device.
+                    try:
+                        await write
+                    except Exception:  # noqa: BLE001 - preserve cancellation
+                        pass
+                    raise
         except Exception as e:  # noqa: BLE001 - tinytuya raises broadly
             raise LocalTuyaError(
                 f"Failed to send local Tuya command to {self.device_id}: {e}"

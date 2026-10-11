@@ -3,9 +3,9 @@
 Every KCP message is one encrypted record (``IV | AES-128-CBC``) keyed by the
 session media key. A record larger than one segment is split across segments
 whose ``frg`` counts down to zero, so records are rejoined *before* they are
-decrypted. Each PUSH segment on the wire is followed by a 20-byte
-``HMAC-SHA1(media_key, segment)`` tag; the device silently drops a PUSH whose tag
-is missing or wrong. ACK and window segments carry no tag.
+decrypted. Every segment we send includes a 20-byte
+``HMAC-SHA1(media_key, segment)`` tag, including ACKs. Device PUSHes carry the
+tag; device ACKs and window segments do not.
 
 Header, little-endian: ``conv u32 | cmd u8 | frg u8 | wnd u16 | ts u32 | sn u32 |
 una u32 | len u32``. ``len`` counts the segment payload (the IV included).
@@ -78,9 +78,10 @@ def decrypt_record(media_key: bytes, record: bytes) -> bytes:
     iv, ciphertext = record[:16], record[16:]
     dec = Cipher(algorithms.AES(media_key), modes.CBC(iv)).decryptor()
     plain = dec.update(ciphertext) + dec.finalize()
-    if plain and 1 <= plain[-1] <= 16:
-        plain = plain[: -plain[-1]]
-    return plain
+    pad = plain[-1]
+    if not 1 <= pad <= 16 or plain[-pad:] != bytes([pad]) * pad:
+        raise ValueError("record has invalid PKCS#7 padding")
+    return plain[:-pad]
 
 
 def build_segment(
@@ -93,7 +94,7 @@ def build_segment(
     unacknowledged: int,
     data: bytes = b"",
 ) -> bytes:
-    """Serialize one segment; a PUSH gets its integrity tag appended."""
+    """Serialize one segment, tagging it when a media key is supplied."""
     segment = _HEADER.pack(
         conversation, command, fragment, _WINDOW, timestamp, sequence, unacknowledged, len(data)
     ) + data
@@ -102,8 +103,8 @@ def build_segment(
     return segment
 
 
-def parse_datagram(datagram: bytes) -> list[Segment]:
-    """Split one UDP datagram into its stacked KCP segments."""
+def parse_datagram(datagram: bytes, media_key: bytes) -> list[Segment]:
+    """Split inbound segments, checking the device's PUSH integrity tags."""
     segments: list[Segment] = []
     pos = 0
     while pos + HEADER_LENGTH <= len(datagram):
@@ -113,6 +114,12 @@ def parse_datagram(datagram: bytes) -> list[Segment]:
         data = datagram[pos + HEADER_LENGTH : pos + HEADER_LENGTH + length]
         if len(data) < length:
             break
+        end = pos + HEADER_LENGTH + length
+        if cmd == CMD_PUSH:
+            tag = datagram[end : end + TAG_LENGTH]
+            expected = hmac.new(media_key, datagram[pos:end], hashlib.sha1).digest()
+            if not hmac.compare_digest(tag, expected):
+                break
         segments.append(Segment(conv, cmd, frg, wnd, ts, sn, una, data))
         pos += HEADER_LENGTH + length
         if cmd == CMD_PUSH:
@@ -152,10 +159,6 @@ class KcpConversation:
         self._received: dict[int, Segment] = {}
         self._fragments: list[bytes] = []
         self._pending: list[_Pending] = []
-        self.last_receive = time.monotonic()
-
-    def set_message_handler(self, handler: Callable[[bytes], None] | None) -> None:
-        self._on_message = handler
 
     @property
     def pending(self) -> int:
@@ -178,7 +181,6 @@ class KcpConversation:
 
     def input(self, segment: Segment) -> None:
         """Feed one inbound segment addressed to this conversation."""
-        self.last_receive = time.monotonic()
         self._retire(segment.unacknowledged)
         if segment.command == CMD_ACK:
             self._pending = [p for p in self._pending if p.sequence != segment.sequence]
@@ -194,7 +196,7 @@ class KcpConversation:
         elif segment.command == CMD_WINDOW_ASK:
             self._transmit(
                 build_segment(
-                    None, self.conversation, CMD_WINDOW_TELL, 0, _now_ms(), 0, self._receive_next
+                    self._key, self.conversation, CMD_WINDOW_TELL, 0, _now_ms(), 0, self._receive_next
                 )
             )
 
