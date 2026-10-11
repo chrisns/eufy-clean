@@ -25,7 +25,7 @@ from homeassistant.helpers.event import async_call_later
 
 from .api.p2p import P2PError, P2PRefused
 from .api.p2p.video import VideoSession
-from .const import VIDEO_MGR_STREAM_OPEN
+from .const import VIDEO_MGR_STATE_SET, VIDEO_MGR_STREAM_OPEN
 
 if TYPE_CHECKING:
     from .coordinator import EufyCleanCoordinator
@@ -93,6 +93,8 @@ class RobotVideo:
         self._frame_event = asyncio.Event()
         self.last_error: str | None = None
         self.sessions = 0
+        self._kick = asyncio.Event()  # a new viewer wakes a stream that is backing off
+        self._cooling_down = False  # ...unless the robot is refusing sessions
 
     # -- public ------------------------------------------------------------
 
@@ -115,6 +117,8 @@ class RobotVideo:
         self._holders += 1
         self._cancel_linger()
         self._ensure_running()
+        if not self._cooling_down:
+            self._kick.set()
         try:
             yield self
         finally:
@@ -179,7 +183,11 @@ class RobotVideo:
                     _LOGGER.debug("Video stream for %s ended: %s", self._coordinator.device_name, err)
                 delay = retry_delay(refused=refused, attempt=attempt)
                 attempt += 1
-                await asyncio.sleep(delay)
+                self._cooling_down = refused
+                self._kick.clear()
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self._kick.wait(), delay)
+                self._cooling_down = False
         finally:
             await self._close_robot_stream()
             self._frame = None
@@ -195,13 +203,13 @@ class RobotVideo:
             # is refused only makes it refuse longer, so do not even start one.
             raise HomeAssistantError("The robot is busy; its camera is only available when idle")
         try:
-            await asyncio.wait_for(feed.session_slot.acquire(), _SLOT_WAIT)
+            await feed.acquire_slot(_SLOT_WAIT)
         except TimeoutError as err:
             raise HomeAssistantError("The robot is busy with the map; try again in a moment") from err
         try:
             await self._stream_in_slot(feed)
         finally:
-            feed.session_slot.release()
+            feed.release_slot()
 
     async def _stream_in_slot(self, feed: P2PMapFeed) -> None:
         rtc = await feed.get_rtc()
@@ -273,17 +281,20 @@ class RobotVideo:
     # -- the robot's video manager (DP 181) --------------------------------
 
     async def _open_robot_stream(self) -> None:
+        """Set ``passEn`` and open the stream; the robot refuses the latter without the former."""
+        await self._video_command("video_pass_enable", VIDEO_MGR_STATE_SET)
+        await self._video_command("video_stream_open", VIDEO_MGR_STREAM_OPEN)
+
+    async def _video_command(self, command: str, method: int) -> None:
         coordinator = self._coordinator
         sent = time.monotonic()
         # wait=False: the robot answers with a DP 181 push, which the coordinator
         # parses; waiting would swallow that reply as the write's return value.
-        await coordinator.async_send_command(
-            coordinator.build_device_command("video_stream_open"), wait=False
-        )
+        await coordinator.async_send_command(coordinator.build_device_command(command), wait=False)
         deadline = sent + _OPEN_REPLY_TIMEOUT
         while time.monotonic() < deadline:
             reply = coordinator.data.video_response
-            if reply and reply[2] >= sent and reply[0] == VIDEO_MGR_STREAM_OPEN:
+            if reply and reply[2] >= sent and reply[0] == method:
                 if reply[1] != 0:
                     raise HomeAssistantError(
                         f"The robot refused to open its camera (result {reply[1]}). "

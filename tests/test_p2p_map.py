@@ -383,3 +383,26 @@ async def test_the_map_session_holds_the_slot_so_the_camera_cannot_overlap_it(ha
     await feed.stop()
     assert seen == [True]
     assert not feed.session_slot.locked()
+
+
+@pytest.mark.asyncio
+async def test_the_camera_can_take_the_slot_from_a_long_running_map_session(hass, fake_session):
+    """A faulted robot never ends its map session, so the camera has to be able to preempt it."""
+    ended = asyncio.Event()
+
+    async def run(self):
+        await ended.wait()  # a session that never ends by itself
+
+    async def close(self):
+        ended.set()
+        self.closed = True
+
+    fake_session.run, fake_session.close = run, close
+    fake_session.script = [[]]
+    feed = _feed(hass, active=False)
+    feed.start()
+    await _until(feed.session_slot.locked)
+    await feed.acquire_slot(2.0)  # must not time out
+    assert feed.session_slot.locked() and fake_session.instances[0].closed
+    feed.release_slot()
+    await feed.stop()

@@ -20,6 +20,7 @@ import base64
 import logging
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -75,6 +76,7 @@ class P2PMapFeed:
         # The robot serves ONE P2P session at a time and refuses any other, so the map
         # feed and the camera take turns: whoever opens a session holds this.
         self.session_slot = asyncio.Lock()
+        self._yield_requested = asyncio.Event()
         self.connected = False
         self.last_object_at: float | None = None
         self.sessions = 0
@@ -176,6 +178,23 @@ class P2PMapFeed:
             except TimeoutError:
                 pass
 
+    async def acquire_slot(self, timeout: float) -> None:
+        """Take the session slot for the camera, asking the map feed to hand it over.
+
+        A map session can last indefinitely (the robot only ends it after it has gone
+        quiet, which a faulted robot never does), so the camera cannot just wait for it.
+        """
+        self._yield_requested.set()
+        try:
+            await asyncio.wait_for(self.session_slot.acquire(), timeout)
+        finally:
+            self._yield_requested.clear()
+
+    def release_slot(self) -> None:
+        """Give the slot back and let the map feed refresh now that the camera is done."""
+        self.session_slot.release()
+        self.poke()
+
     async def _run_session(self) -> None:
         async with self.session_slot:
             await self._run_session_in_slot()
@@ -193,7 +212,20 @@ class P2PMapFeed:
             on_object=self._on_object,
         )
         self.sessions += 1
-        await self._session.run()
+        runner = asyncio.ensure_future(self._session.run())
+        yielder = asyncio.ensure_future(self._yield_requested.wait())
+        try:
+            await asyncio.wait({runner, yielder}, return_when=asyncio.FIRST_COMPLETED)
+            if runner.done():
+                runner.result()  # the session ended (or failed): report it as before
+            else:
+                _LOGGER.debug("P2P map session for %s yields to the camera", self._name)
+                await self._session.close()
+        finally:
+            yielder.cancel()
+            runner.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await runner
 
     def _on_object(self, name: str, obj: bytes) -> None:
         if not self.connected:

@@ -31,7 +31,10 @@ from custom_components.robovac_mqtt.camera import (
     EufyVideoCamera,
     _add_video_camera_when_supported,
 )
-from custom_components.robovac_mqtt.const import VIDEO_MGR_STREAM_OPEN
+from custom_components.robovac_mqtt.const import (
+    VIDEO_MGR_STATE_SET,
+    VIDEO_MGR_STREAM_OPEN,
+)
 from custom_components.robovac_mqtt.models import VacuumState
 from custom_components.robovac_mqtt.video_stream import (
     FFMPEG_ARGS,
@@ -147,6 +150,7 @@ def test_video_session_hands_nal_units_out_and_counts_as_connected():
 
 
 def test_stream_commands_match_the_bytes_sent_to_a_real_robot():
+    assert build_command("video_pass_enable") == {"181": "EAoECAIQARIICgYKBAoCCAE="}
     assert build_command("video_stream_open") == {"181": "BgoECAMQAQ=="}
     assert build_command("video_stream_close") == {"181": "BgoECAQQAQ=="}
 
@@ -198,30 +202,52 @@ async def test_hold_refuses_when_the_camera_is_switched_off(video, coordinator):
             pytest.fail("must not stream with the camera off")
 
 
-@pytest.mark.asyncio
-async def test_open_succeeds_on_a_zero_result_reply(video, coordinator):
-    async def reply(*_a, **_k):
-        coordinator.data = VacuumState(video_response=(VIDEO_MGR_STREAM_OPEN, 0, time.monotonic()))
+def _answer(coordinator, *, open_result: int, set_result: int = 0):
+    """A robot that answers each DP 181 command with the matching reply."""
+
+    async def reply(command_dict, **_kwargs):
+        name = command_dict["181"]
+        method, result = (VIDEO_MGR_STATE_SET, set_result) if name == "video_pass_enable" else (VIDEO_MGR_STREAM_OPEN, open_result)
+        coordinator.data = VacuumState(video_response=(method, result, time.monotonic()))
 
     coordinator.async_send_command.side_effect = reply
+
+
+@pytest.mark.asyncio
+async def test_open_sets_pass_enable_then_opens_the_stream(video, coordinator):
+    sent: list[str] = []
+    _answer(coordinator, open_result=0)
+    inner = coordinator.async_send_command.side_effect
+
+    async def record(command_dict, **kwargs):
+        sent.append(command_dict["181"])
+        await inner(command_dict, **kwargs)
+
+    coordinator.async_send_command.side_effect = record
     await video._open_robot_stream()
+    assert sent == ["video_pass_enable", "video_stream_open"]
     # wait=False: the reply is a push, so the write must not swallow it.
     assert coordinator.async_send_command.await_args.kwargs == {"wait": False}
 
 
 @pytest.mark.asyncio
 async def test_open_reports_a_refusal(video, coordinator):
-    async def reply(*_a, **_k):
-        coordinator.data = VacuumState(video_response=(VIDEO_MGR_STREAM_OPEN, 1, time.monotonic()))
-
-    coordinator.async_send_command.side_effect = reply
+    _answer(coordinator, open_result=1)
     with pytest.raises(HomeAssistantError, match="refused"):
         await video._open_robot_stream()
 
 
 @pytest.mark.asyncio
+async def test_open_stops_if_the_pass_enable_is_refused(video, coordinator):
+    _answer(coordinator, open_result=0, set_result=1)
+    with pytest.raises(HomeAssistantError, match="refused"):
+        await video._open_robot_stream()
+    assert coordinator.async_send_command.await_count == 1  # never got as far as StreamOpen
+
+
+@pytest.mark.asyncio
 async def test_open_ignores_a_stale_reply_and_times_out(video, coordinator, monkeypatch):
-    coordinator.data = VacuumState(video_response=(VIDEO_MGR_STREAM_OPEN, 0, time.monotonic() - 60))
+    coordinator.data = VacuumState(video_response=(VIDEO_MGR_STATE_SET, 0, time.monotonic() - 60))
     monkeypatch.setattr("custom_components.robovac_mqtt.video_stream._OPEN_REPLY_TIMEOUT", 0.3)
     with pytest.raises(HomeAssistantError, match="did not answer"):
         await video._open_robot_stream()
@@ -573,11 +599,9 @@ def test_the_camera_waits_a_long_time_after_a_refusal_and_backs_off_otherwise():
 async def test_the_camera_waits_for_the_map_feed_to_release_the_session_slot(video, coordinator, monkeypatch):
     """The robot serves one P2P session at a time and refuses any other."""
     feed = MagicMock()
-    feed.session_slot = asyncio.Lock()
+    feed.acquire_slot = AsyncMock(side_effect=TimeoutError)
     feed.get_rtc = AsyncMock()
     coordinator.p2p = feed
-    monkeypatch.setattr("custom_components.robovac_mqtt.video_stream._SLOT_WAIT", 0.05)
-    await feed.session_slot.acquire()  # the map feed has a session open
     with pytest.raises(HomeAssistantError, match="busy with the map"):
         await video._stream_once()
     feed.get_rtc.assert_not_awaited()  # no cloud config fetched, no slot burned on the robot
@@ -586,9 +610,30 @@ async def test_the_camera_waits_for_the_map_feed_to_release_the_session_slot(vid
 @pytest.mark.asyncio
 async def test_the_slot_is_released_when_the_stream_ends(video, coordinator):
     feed = MagicMock()
-    feed.session_slot = asyncio.Lock()
+    feed.acquire_slot = AsyncMock()
     coordinator.p2p = feed
     video._stream_in_slot = AsyncMock(side_effect=HomeAssistantError("ended"))
     with pytest.raises(HomeAssistantError, match="ended"):
         await video._stream_once()
-    assert not feed.session_slot.locked()
+    feed.release_slot.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_new_viewer_wakes_a_stream_that_is_backing_off(video):
+    video._kick.clear()
+    waiter = asyncio.ensure_future(asyncio.wait_for(video._kick.wait(), 5))
+    await asyncio.sleep(0)
+    video._holders = 0
+    video._ensure_running = lambda: None
+    async with video.hold():
+        pass
+    await waiter  # returns at once because hold() set the kick
+
+
+@pytest.mark.asyncio
+async def test_a_new_viewer_does_not_wake_a_stream_the_robot_is_refusing(video):
+    video._cooling_down = True
+    video._ensure_running = lambda: None
+    async with video.hold():
+        pass
+    assert not video._kick.is_set()
