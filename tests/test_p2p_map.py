@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.robovac_mqtt import p2p_map
+from custom_components.robovac_mqtt.api.p2p import P2PRefused
 from custom_components.robovac_mqtt.api.p2p.mapdata import (
     CHANGED_MAP,
     CHANGED_ROOMS,
@@ -341,3 +342,27 @@ async def test_repeated_quick_failures_trigger_a_long_cooldown(hass, fake_sessio
         await _until(lambda: feed.failures >= 4)
         await feed.stop()
     assert p2p_map._FAILURE_COOLDOWN in waits
+
+
+@pytest.mark.asyncio
+async def test_a_refused_session_triggers_a_long_cooldown_after_just_one(hass, fake_session):
+    """Every further attempt at a refusing robot makes it refuse for longer."""
+    fake_session.script = [P2PRefused("robot sent disconnect")] * 5
+    waits: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy(awaitable, timeout=None):
+        if timeout is not None and timeout > 1:
+            waits.append(timeout)
+        return await real_wait_for(awaitable, 0.01)
+
+    with (
+        patch.object(p2p_map, "_ACTIVE_RETRY", 0.01),
+        patch.object(p2p_map.asyncio, "wait_for", spy),
+    ):
+        feed = _feed(hass, active=True)
+        feed.start()
+        await _until(lambda: feed.failures >= 1)
+        await _until(lambda: waits)
+        await feed.stop()
+    assert waits[0] == p2p_map._REFUSAL_COOLDOWN

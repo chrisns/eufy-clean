@@ -14,9 +14,15 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.robovac_mqtt.api.commands import build_command
-from custom_components.robovac_mqtt.api.p2p import control, kcp
+from custom_components.robovac_mqtt.api.p2p import P2PError, P2PRefused, control, kcp
 from custom_components.robovac_mqtt.api.p2p.framing import CMD_RTC, decode_frames
-from custom_components.robovac_mqtt.api.p2p.video import RtpHevcReader, VideoSession
+from custom_components.robovac_mqtt.api.p2p.video import (
+    STREAM_SETTLE,
+    VARIANT_PASSES,
+    VARIANT_WAIT,
+    RtpHevcReader,
+    VideoSession,
+)
 from custom_components.robovac_mqtt.api.parser import (
     _parse_video_manager_reply,
     update_state,
@@ -27,7 +33,11 @@ from custom_components.robovac_mqtt.camera import (
 )
 from custom_components.robovac_mqtt.const import VIDEO_MGR_STREAM_OPEN
 from custom_components.robovac_mqtt.models import VacuumState
-from custom_components.robovac_mqtt.video_stream import FFMPEG_ARGS, RobotVideo
+from custom_components.robovac_mqtt.video_stream import (
+    FFMPEG_ARGS,
+    RobotVideo,
+    retry_delay,
+)
 
 START = b"\x00\x00\x00\x01"
 SSRC = b"\x00\x00\x00\x0a"
@@ -469,6 +479,7 @@ def _video_session(open_stream=None) -> tuple[VideoSession, _Conversation]:
 @pytest.mark.asyncio
 async def test_the_stream_is_opened_after_the_prelude_and_before_any_video_start(monkeypatch):
     monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 0.01)
+    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.STREAM_SETTLE", 0.01)
     order: list[str] = []
     session, conversation = _video_session()
 
@@ -482,11 +493,12 @@ async def test_the_stream_is_opened_after_the_prelude_and_before_any_video_start
 
 
 @pytest.mark.asyncio
-async def test_every_start_variant_is_tried_in_order_when_no_video_arrives(monkeypatch):
+async def test_every_start_variant_is_tried_in_order_twice_when_no_video_arrives(monkeypatch):
     monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 0.01)
     session, conversation = _video_session()
     await session._start_video()
-    expected = [p for v in control.VIDEO_START_VARIANTS for p in control.video_start_variant(v)]
+    one_pass = [p for v in control.VIDEO_START_VARIANTS for p in control.video_start_variant(v)]
+    expected = one_pass * 2
     assert conversation.sent[3:] == expected
     assert session.variant_used == control.VIDEO_START_VARIANTS[-1]
 
@@ -517,3 +529,38 @@ def test_the_first_variant_is_the_one_proven_on_a_real_robot():
     assert [(control.parse(p).type, control.parse(p).sub_command) for p in control.video_start_variant("b")] == [
         (0x10002, 9), (0x10003, 6), (0x10004, 0x40006),
     ]
+
+
+def test_the_session_waits_long_enough_for_every_pass_of_the_ladder():
+    session, _ = _video_session()
+    ladder = VARIANT_WAIT * VARIANT_PASSES * len(control.VIDEO_START_VARIANTS)
+    assert session.connect_timeout > STREAM_SETTLE + ladder
+
+
+# -- refusals ---------------------------------------------------------------------
+
+
+def _disconnect(session, reason: int) -> None:
+    session._on_signal({"header": {"type": "disconnect"}, "msg": {"close_reason": reason, "close_reason_local": 7}})
+
+
+@pytest.mark.parametrize("reason", [4, 12])
+def test_a_disconnect_before_the_session_connects_is_a_refusal(reason):
+    session, _ = _video_session()
+    _disconnect(session, reason)
+    assert isinstance(session._failure, P2PRefused)
+
+
+@pytest.mark.parametrize(("reason", "connected"), [(6, False), (4, True), (0, True)])
+def test_other_disconnects_are_ordinary_failures(reason, connected):
+    """Reason 6 is the normal idle close; anything after the stream is flowing is not a refusal."""
+    session, _ = _video_session()
+    if connected:
+        session._first_object.set()
+    _disconnect(session, reason)
+    assert isinstance(session._failure, P2PError) and not isinstance(session._failure, P2PRefused)
+
+
+def test_the_camera_waits_a_long_time_after_a_refusal_and_backs_off_otherwise():
+    assert retry_delay(refused=True, attempt=0) == 30 * 60
+    assert [retry_delay(refused=False, attempt=n) for n in range(6)] == [5.0, 30.0, 300.0, 600.0, 600.0, 600.0]

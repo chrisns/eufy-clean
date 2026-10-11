@@ -23,7 +23,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_call_later
 
-from .api.p2p import P2PError
+from .api.p2p import P2PError, P2PRefused
 from .api.p2p.video import VideoSession
 from .const import VIDEO_MGR_STREAM_OPEN
 
@@ -39,6 +39,8 @@ _STALL_SECONDS = 10.0  # no new frame for this long -> restart the session
 # Each attempt fetches a cloud config that reserves a slot on the robot until used,
 # so a refusing robot is retried rarely, not hammered.
 _RETRY_BACKOFF = (5.0, 30.0, 300.0, 600.0)
+# A robot that refuses a session refuses for longer the more it is asked.
+_REFUSAL_BACKOFF = 30 * 60
 _JPEG_START, _JPEG_END = b"\xff\xd8", b"\xff\xd9"
 
 # H.265 NAL units in on stdin, one JPEG per frame out on stdout.
@@ -53,6 +55,13 @@ FFMPEG_ARGS: tuple[str, ...] = (
     "-an", "-pix_fmt", "yuvj420p",
     "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "5", "pipe:1",
 )
+
+
+def retry_delay(*, refused: bool, attempt: int) -> float:
+    """Seconds to wait before the next stream attempt (the nth in a row)."""
+    if refused:
+        return _REFUSAL_BACKOFF
+    return _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
 
 
 def _ffmpeg_binary(hass: HomeAssistant) -> str:
@@ -158,13 +167,15 @@ class RobotVideo:
         attempt = 0
         try:
             while True:
+                refused = False
                 try:
                     await self._stream_once()
                     attempt = 0
                 except (HomeAssistantError, P2PError, OSError) as err:
                     self.last_error = str(err)
+                    refused = isinstance(err, P2PRefused)
                     _LOGGER.debug("Video stream for %s ended: %s", self._coordinator.device_name, err)
-                delay = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                delay = retry_delay(refused=refused, attempt=attempt)
                 attempt += 1
                 await asyncio.sleep(delay)
         finally:

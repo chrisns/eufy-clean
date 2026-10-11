@@ -46,6 +46,19 @@ class P2PError(Exception):
     """The P2P session could not be opened or has died."""
 
 
+class P2PRefused(P2PError):
+    """The robot closed the session before it connected (it is refusing sessions).
+
+    Retrying quickly makes it refuse for longer, so callers should back off for a
+    long time rather than reconnect.
+    """
+
+
+# close_reason values the robot sends when it refuses a session outright: 4 (torn down
+# before reaching the connected state) and 12 (the session could not be created).
+REFUSAL_REASONS = (4, 12)
+
+
 def _random(length: int) -> str:
     return "".join(secrets.choice(_ALNUM) for _ in range(length))
 
@@ -159,6 +172,7 @@ class P2PSession:
         self._closed = asyncio.Event()
         self._failure: BaseException | None = None
         self._reassembler = StreamReassembler()
+        self.connect_timeout = _CONNECT_TIMEOUT
         self._conversations: dict[int, kcp.KcpConversation] = {}
         self.bytes_received = 0
 
@@ -208,7 +222,7 @@ class P2PSession:
             opened = asyncio.ensure_future(self._first_object.wait())
             ended = asyncio.ensure_future(self._closed.wait())
             done, _ = await asyncio.wait(
-                {opened, ended}, timeout=_CONNECT_TIMEOUT, return_when=asyncio.FIRST_COMPLETED
+                {opened, ended}, timeout=self.connect_timeout, return_when=asyncio.FIRST_COMPLETED
             )
             opened.cancel()
             ended.cancel()
@@ -221,6 +235,8 @@ class P2PSession:
                 _LOGGER.debug("p2p: %s flowing from %s", self._stream_label, self._host)
                 await self._closed.wait()
             if self._failure is not None:
+                if isinstance(self._failure, P2PError):
+                    raise self._failure
                 raise P2PError(str(self._failure)) from self._failure
         finally:
             self._closed.set()
@@ -336,7 +352,10 @@ class P2PSession:
                 self._send_consent(nominate=False)
         elif kind == "disconnect":
             _LOGGER.debug("p2p: robot disconnect: %s", msg)
-            self._fail(P2PError(f"robot sent disconnect: {msg}"))
+            error = P2PRefused if (
+                not self._first_object.is_set() and msg.get("close_reason") in REFUSAL_REASONS
+            ) else P2PError
+            self._fail(error(f"robot sent disconnect: {msg}"))
 
     def _on_datagram(self, datagram: bytes, addr: tuple[str, int]) -> None:
         if self._robot_addr is None or addr != self._robot_addr:

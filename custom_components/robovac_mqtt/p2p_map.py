@@ -24,7 +24,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .api.p2p import P2PError, P2PSession
+from .api.p2p import P2PError, P2PRefused, P2PSession
 from .api.p2p.mapdata import Obstacle, P2PMap, P2PMapDecoder, Pose, decode_path
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,6 +37,10 @@ _BACKOFF_MAX = 120.0
 # sessions in a row stop trying for a while rather than burn slots.
 _MAX_QUICK_FAILURES = 3
 _FAILURE_COOLDOWN = 30 * 60
+# A robot that closes a session before it connects is refusing sessions, and every
+# further attempt makes it refuse for longer (observed: a lockout of well over half
+# an hour after a handful of quick retries), so wait a long time after even one.
+_REFUSAL_COOLDOWN = 30 * 60
 _REACHABLE_TIMEOUT = 3.0
 
 
@@ -141,6 +145,7 @@ class P2PMapFeed:
         while True:
             self._wake.clear()
             started = time.monotonic()
+            refused = False
             try:
                 await self._run_session()
                 self.last_error = None
@@ -149,6 +154,7 @@ class P2PMapFeed:
             except Exception as err:  # noqa: BLE001 - keep supervising whatever happens
                 self.failures += 1
                 self.last_error = str(err)
+                refused = isinstance(err, P2PRefused)
                 _LOGGER.debug("P2P map session for %s ended: %s", self._name, err)
                 if time.monotonic() - started < 30:
                     backoff = min(backoff * 2, _BACKOFF_MAX)
@@ -160,6 +166,8 @@ class P2PMapFeed:
             delay = backoff if self._is_active() else _IDLE_REFRESH
             if self._failures_in_a_row >= _MAX_QUICK_FAILURES:
                 delay = max(delay, _FAILURE_COOLDOWN)
+            if refused:
+                delay = max(delay, _REFUSAL_COOLDOWN)
             try:
                 await asyncio.wait_for(self._wake.wait(), delay)
             except TimeoutError:

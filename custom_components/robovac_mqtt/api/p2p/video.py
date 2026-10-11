@@ -108,6 +108,11 @@ class RtpHevcReader:
 
 
 VARIANT_WAIT = 3.0  # how long a start variant gets to produce video before the next is tried
+VARIANT_PASSES = 2  # the whole ladder is walked this many times
+# After the robot confirms its stream is open, give the camera pipeline this long to
+# come up before the first start request: earlier sessions that streamed had the
+# stream open for several seconds first.
+STREAM_SETTLE = 2.5
 
 
 class VideoSession(P2PSession):
@@ -131,6 +136,7 @@ class VideoSession(P2PSession):
     ) -> None:
         super().__init__(on_object=lambda _name, _obj: None, **kwargs)
         self._on_nal = on_nal
+        self.connect_timeout = 10 + STREAM_SETTLE + VARIANT_WAIT * VARIANT_PASSES * len(control.VIDEO_START_VARIANTS)
         self._open_stream = open_stream
         self._start_task: asyncio.Future | None = None
         self.reader = RtpHevcReader()
@@ -153,8 +159,8 @@ class VideoSession(P2PSession):
                 conversation.send(packet)
             if self._open_stream is not None:
                 await self._open_stream()
-            await asyncio.sleep(0.2)
-            for variant in control.VIDEO_START_VARIANTS:
+            await asyncio.sleep(STREAM_SETTLE if self._open_stream is not None else 0.2)
+            for variant in control.VIDEO_START_VARIANTS * VARIANT_PASSES:
                 if self._first_object.is_set():
                     return
                 self.variant_used = variant

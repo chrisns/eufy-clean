@@ -8,6 +8,6 @@ expose them nowhere else (``mqtt=False`` devices such as the S1 Pro). See
 
 from __future__ import annotations
 
-from .session import P2PError, P2PSession
+from .session import P2PError, P2PRefused, P2PSession
 
-__all__ = ["P2PError", "P2PSession"]
+__all__ = ["P2PError", "P2PRefused", "P2PSession"]
