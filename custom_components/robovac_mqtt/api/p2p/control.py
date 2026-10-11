@@ -73,22 +73,40 @@ def _io_control(request_id: int, command: int, op: int, *args: int) -> bytes:
     return _command(0x10000 | request_id, (op << 16) | command, _u32(*args))
 
 
-def video_start_packets(device_password: str, local_key: str) -> list[bytes]:
-    """Return the conversation-0 packets that make the robot open its camera stream.
+# IOCtrl sequences that ask the robot to start video, in the order to try them. The
+# first is the one proven on an S1 Pro (clarity, then two video-channel starts); the
+# others are the variants seen in the Tuya IPC SDK, tried in the same session if the
+# first draws no video.
+VIDEO_START_VARIANTS: tuple[str, ...] = ("b", "c", "a", "d", "e")
 
-    Auth, a hello and the capability exchange, then three IOCtrl requests (clarity,
-    then two video-channel starts). The robot answers each and opens conversation 1
-    with the RTP/H.265 stream. It only does so after the camera stream has been
-    opened with the ``StreamOpen`` video-manager command on DP 181.
-    """
+
+def video_prelude_packets(device_password: str, local_key: str) -> list[bytes]:
+    """Auth, hello and the capability exchange that open every IPC session."""
     return [
         _auth_packet(auth_credential(device_password, local_key)),
         _command(0, 0x0A, _u32(0x00010001)),
         _command(0, 0x15, _CAPABILITIES),
-        _io_control(2, 9, 0, 0, 2),
-        _io_control(3, 6, 0, 0, 0),
-        _io_control(4, 6, 4, 0, 4),
     ]
+
+
+def video_start_variant(variant: str) -> list[bytes]:
+    """The IOCtrl requests of one start variant (see ``VIDEO_START_VARIANTS``)."""
+    return {
+        "a": [_io_control(2, 6, 3, 0, 3)],
+        "b": [_io_control(2, 9, 0, 0, 2), _io_control(3, 6, 0, 0, 0), _io_control(4, 6, 4, 0, 4)],
+        "c": [_io_control(2, 9, 0, 1, 4), _io_control(3, 6, 0, 1, 0), _io_control(4, 6, 4, 1, 4)],
+        "d": [_io_control(2, 6, 3, 1, 3)],
+        "e": [_io_control(2, 6, 1, 0, 0), _io_control(3, 6, 2, 0, 0)],
+    }[variant]
+
+
+def video_start_packets(device_password: str, local_key: str) -> list[bytes]:
+    """The prelude plus the proven start variant, as one list (see ``VIDEO_START_VARIANTS``).
+
+    The robot answers each request and opens conversation 1 with the RTP/H.265 stream,
+    but only once the camera stream has been opened with ``StreamOpen`` on DP 181.
+    """
+    return video_prelude_packets(device_password, local_key) + video_start_variant("b")
 
 
 def start_packets(device_password: str, local_key: str) -> list[bytes]:

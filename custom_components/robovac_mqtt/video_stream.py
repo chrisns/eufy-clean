@@ -177,9 +177,10 @@ class RobotVideo:
         feed = coordinator.p2p
         if feed is None:
             raise HomeAssistantError("No local P2P connection to the robot")
-        # Open the robot's stream first: if it refuses (it is cleaning, say) no cloud
-        # config has been fetched, so no slot on the robot is reserved for nothing.
-        await self._open_robot_stream()
+        if coordinator.data.activity in ("cleaning", "returning"):
+            # The robot refuses to open its camera while it works, and a session that
+            # is refused only makes it refuse longer, so do not even start one.
+            raise HomeAssistantError("The robot is busy; its camera is only available when idle")
         rtc = await feed.get_rtc()
 
         ffmpeg = await asyncio.create_subprocess_exec(
@@ -198,6 +199,7 @@ class RobotVideo:
             device_password=rtc["device_password"],
             ice_config=rtc.get("ice_config"),
             cloud_session=rtc.get("session"),
+            open_stream=self._open_robot_stream,
             on_nal=lambda nal: None if stdin.is_closing() else stdin.write(nal),
         )
         self.sessions += 1

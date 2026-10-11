@@ -434,16 +434,86 @@ def test_an_unusable_cloud_session_falls_back_to_a_generated_one(bad):
 
 
 @pytest.mark.asyncio
-async def test_a_refused_stream_open_does_not_fetch_a_cloud_config(video, coordinator):
-    """A fetched config reserves a slot on the robot until used, so fetch only once it will be."""
+async def test_a_busy_robot_gets_no_session_and_no_cloud_config(video, coordinator):
+    """A refused session only makes the robot refuse longer; a fetched config reserves a slot."""
     feed = MagicMock()
     feed.get_rtc = AsyncMock()
     coordinator.p2p = feed
-
-    async def refuse(*_a, **_k):
-        coordinator.data = VacuumState(video_response=(VIDEO_MGR_STREAM_OPEN, 1, time.monotonic()))
-
-    coordinator.async_send_command.side_effect = refuse
-    with pytest.raises(HomeAssistantError, match="refused"):
+    coordinator.data = VacuumState(api_type="novel", camera_enabled=True, activity="cleaning")
+    with pytest.raises(HomeAssistantError, match="busy"):
         await video._stream_once()
     feed.get_rtc.assert_not_awaited()
+
+
+# -- starting the video within one session ----------------------------------------
+
+
+class _Conversation:
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    def send(self, packet: bytes) -> None:
+        self.sent.append(packet)
+
+
+def _video_session(open_stream=None) -> tuple[VideoSession, _Conversation]:
+    session = VideoSession(
+        on_nal=lambda _n: None, open_stream=open_stream, host="127.0.0.1",
+        local_key="k" * 16, device_id="dev", device_password="pw",
+    )
+    conversation = _Conversation()
+    session._conversations = {kcp.CONV_CONTROL: conversation}  # type: ignore[dict-item]
+    return session, conversation
+
+
+@pytest.mark.asyncio
+async def test_the_stream_is_opened_after_the_prelude_and_before_any_video_start(monkeypatch):
+    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 0.01)
+    order: list[str] = []
+    session, conversation = _video_session()
+
+    async def open_stream():
+        order.append(f"open after {len(conversation.sent)} packets")
+
+    session._open_stream = open_stream
+    await session._start_video()
+    assert order == ["open after 3 packets"]  # auth, hello and capabilities were sent first
+    assert len(conversation.sent) > 3
+
+
+@pytest.mark.asyncio
+async def test_every_start_variant_is_tried_in_order_when_no_video_arrives(monkeypatch):
+    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 0.01)
+    session, conversation = _video_session()
+    await session._start_video()
+    expected = [p for v in control.VIDEO_START_VARIANTS for p in control.video_start_variant(v)]
+    assert conversation.sent[3:] == expected
+    assert session.variant_used == control.VIDEO_START_VARIANTS[-1]
+
+
+@pytest.mark.asyncio
+async def test_no_further_variants_are_sent_once_video_flows(monkeypatch):
+    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 1.0)
+    session, conversation = _video_session()
+    session._first_object.set()
+    await session._start_video()
+    assert len(conversation.sent) == 3  # only the prelude
+    assert session.variant_used is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stream_open_ends_the_session_without_sending_video_starts():
+    async def refuse():
+        raise HomeAssistantError("refused")
+
+    session, conversation = _video_session(open_stream=refuse)
+    await session._start_video()
+    assert len(conversation.sent) == 3
+    assert isinstance(session._failure, HomeAssistantError)
+
+
+def test_the_first_variant_is_the_one_proven_on_a_real_robot():
+    assert control.VIDEO_START_VARIANTS[0] == "b"
+    assert [(control.parse(p).type, control.parse(p).sub_command) for p in control.video_start_variant("b")] == [
+        (0x10002, 9), (0x10003, 6), (0x10004, 0x40006),
+    ]

@@ -14,9 +14,10 @@ RFC 7798 (single NAL units, aggregation packets and fragmentation units), which
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import struct
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 from . import control, kcp
@@ -106,15 +107,34 @@ class RtpHevcReader:
             yield _START_CODE + payload
 
 
+VARIANT_WAIT = 3.0  # how long a start variant gets to produce video before the next is tried
+
+
 class VideoSession(P2PSession):
-    """A P2P session that asks for the camera stream and hands out H.265 NAL units."""
+    """A P2P session that asks for the camera stream and hands out H.265 NAL units.
+
+    ``open_stream`` is awaited once the control channel is up and before any video
+    start is sent, which is the app's order (connect, then ask the robot to open its
+    stream). Each start variant then gets a few seconds to produce video before the
+    next is tried, all within this one session: the robot only has a few session
+    slots, so a single session should answer as much as it can.
+    """
 
     _stream_label = "camera stream"
 
-    def __init__(self, *, on_nal: Callable[[bytes], None], **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        on_nal: Callable[[bytes], None],
+        open_stream: Callable[[], Awaitable[None]] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(on_object=lambda _name, _obj: None, **kwargs)
         self._on_nal = on_nal
+        self._open_stream = open_stream
+        self._start_task: asyncio.Future | None = None
         self.reader = RtpHevcReader()
+        self.variant_used: str | None = None
 
     def _extra_conversations(self) -> dict[int, kcp.KcpConversation]:
         return {
@@ -124,9 +144,34 @@ class VideoSession(P2PSession):
         }
 
     def _send_control_burst(self) -> None:
-        conversation = self._conversations[kcp.CONV_CONTROL]
-        for packet in control.video_start_packets(self._device_password, self._local_key):
-            conversation.send(packet)
+        self._start_task = asyncio.ensure_future(self._start_video())
+
+    async def _start_video(self) -> None:
+        try:
+            conversation = self._conversations[kcp.CONV_CONTROL]
+            for packet in control.video_prelude_packets(self._device_password, self._local_key):
+                conversation.send(packet)
+            if self._open_stream is not None:
+                await self._open_stream()
+            await asyncio.sleep(0.2)
+            for variant in control.VIDEO_START_VARIANTS:
+                if self._first_object.is_set():
+                    return
+                self.variant_used = variant
+                _LOGGER.debug("p2p: asking for video, variant %s", variant)
+                for packet in control.video_start_variant(variant):
+                    conversation.send(packet)
+                try:
+                    await asyncio.wait_for(self._first_object.wait(), VARIANT_WAIT)
+                except TimeoutError:
+                    continue
+        except Exception as err:  # noqa: BLE001 - a failed start ends the session
+            self._fail(err)
+
+    def _shutdown(self) -> None:
+        if self._start_task is not None:
+            self._start_task.cancel()
+        super()._shutdown()
 
     def _on_video_record(self, plaintext: bytes) -> None:
         self.bytes_received += len(plaintext)
