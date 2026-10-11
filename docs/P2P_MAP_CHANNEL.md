@@ -152,6 +152,18 @@ Path points are 5 bytes: `x i16 BE | y i16 BE | flags` (cm). Flags low nibble:
 6. ACK every conv-5 PUSH (tagged), reassemble records by `sn`/`frg`, decrypt,
    split into chunks, decode the objects.
 
+## The cloud config is single-use
+
+`m.ipc.v4.rtc.config.get` returns, besides the device password and the ICE
+servers, a `p2pConfig.session` the cloud has just **reserved on the robot**:
+`sessionId`, `iceUfrag`, `icePassword`, `aesKey`, `traceId` and `uid`, valid for
+about ten hours. The reservation takes one of the robot's few session slots and is
+released only by opening a session with exactly that identity (use `uid` as the
+offer's `from`). Opening sessions with a made-up identity instead leaves the
+reservation unused, so enough fetches (each Home Assistant restart, each probe)
+make the robot refuse every session. Fetch immediately before each session and
+use the result; never cache it.
+
 ## When the robot refuses sessions
 
 The robot answers every offer and then closes the session with a type-32
