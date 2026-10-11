@@ -107,7 +107,8 @@ HACS metadata checks; the existing license is not changed by this PR.
 The test workflow also supports explicit runs on the fork. Dependency install
 failures now stop the job. The clean runner exposed a missing development
 dependency, `voluptuous-serialize`, used by the configuration-form serialization
-regressions; it is declared in both development dependency lists.
+regressions; it is declared in both development dependency lists. The CI runner
+installs FFmpeg so the generated H.265-to-JPEG test runs instead of being skipped.
 
 The HA camera and movement evidence was obtained before this maintenance review.
 The reviewed transport received an additional live map check; the camera startup
