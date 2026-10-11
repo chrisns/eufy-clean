@@ -132,5 +132,5 @@ the successful HA turn test. They are demonstrations, not generated fixtures.
 The 2026-10-11 follow-up recovered the exact S1 Pro E75/raw 19924741 and
 E30/raw 19923712 mappings from the vendor app. Active errors now clear on a
 confirmed healthy WorkStatus and retain last-error diagnostics. The tested
-three-attempt/30-minute HA automation and its deployment details are in
+ten-attempt/30-minute HA automation and its deployment details are in
 [DOCKING_RECOVERY.md](DOCKING_RECOVERY.md).

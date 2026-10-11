@@ -42,7 +42,7 @@ async def retry(hass, tmp_path, request):
     config = {"id": "eufy_dock_retry", **copy.deepcopy(AUTOMATION)}
     if getattr(request, "param", False):
         # Accelerate only timer waits for the persistent-failure scenario.
-        # Separate tests exercise the real ten-minute cooldown and cancellation.
+        # Separate tests exercise the real three-minute cooldown and cancellation.
         def immediate_waits(node):
             if isinstance(node, dict):
                 if "wait_template" in node:
@@ -97,10 +97,10 @@ async def test_invalid_history_fails_closed(hass, retry, history):
     assert hass.states.get(HELPER).state == history
 
 
-async def test_fourth_retry_is_rejected_without_resetting_the_persistent_budget(hass, retry):
+async def test_eleventh_retry_is_rejected_without_resetting_the_persistent_budget(hass, retry):
     calls, entity = retry
     now = int(dt_util.utcnow().timestamp())
-    previous = [now - 1500, now - 900, now - 300]
+    previous = [now - 1790 + index * 180 for index in range(10)]
     await hass.services.async_call("input_text", "set_value", {"entity_id": HELPER, "value": json.dumps(previous)}, blocking=True)
     fault(hass)
     await trigger(hass, entity)
@@ -128,13 +128,13 @@ async def test_recovery_during_cooldown_cancels_the_waiting_retry(hass, retry):
     assert not calls
     hass.states.async_set(VACUUM, "docked", {"error_code": "E75", "error_codes": ["E75"]})
     await asyncio.wait_for(task, 2)
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=11))
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=4))
     await hass.async_block_till_done()
     assert calls == []
 
 
 @pytest.mark.parametrize("retry", [True], indirect=True)
-async def test_persistent_failure_sends_exactly_three_commands(hass, retry):
+async def test_persistent_failure_sends_exactly_ten_commands(hass, retry):
     calls, entity = retry
 
     async def still_faulted(call):
@@ -143,7 +143,7 @@ async def test_persistent_failure_sends_exactly_three_commands(hass, retry):
     hass.services.async_register("vacuum", "send_command", still_faulted)
     fault(hass)
     await trigger(hass, entity)
-    assert calls == ["resume", "resume", "resume"]
-    assert len(json.loads(hass.states.get(HELPER).state)) == 3
+    assert calls == ["resume"] * 10
+    assert len(json.loads(hass.states.get(HELPER).state)) == 10
     await trigger(hass, entity)
-    assert calls == ["resume", "resume", "resume"]
+    assert calls == ["resume"] * 10

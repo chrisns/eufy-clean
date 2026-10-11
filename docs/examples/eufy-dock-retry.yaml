@@ -1,7 +1,7 @@
 # Requires input_text.eufy_dock_retry_history (max: 255, no initial value).
-alias: 'Eufy: retry failed docking (three in 30 minutes)'
+alias: 'Eufy: retry failed docking (ten in 30 minutes)'
 description: Only E74/E75/E76. Resume an interrupted task; E76 has ended the task,
-  so use native return-to-base. Persistent rolling limit, ten-minute spacing, stop
+  so use native return-to-base. Persistent rolling limit, three-minute spacing, stop
   on recovery or any other fault.
 mode: single
 max_exceeded: silent
@@ -30,7 +30,7 @@ actions:
   - delay:
       seconds: 30
 - repeat:
-    count: 3
+    count: 10
     sequence:
     - condition: template
       value_template: "{% set codes = state_attr('vacuum.robovac', 'error_codes')\
@@ -55,7 +55,7 @@ actions:
 
           {% endfor %}{% endif %}
 
-          {{ ns.valid and stored_attempts | count <= 3 }}'
+          {{ ns.valid and stored_attempts | count <= 10 }}'
     - if:
       - condition: template
         value_template: '{{ not history_valid }}'
@@ -72,17 +72,17 @@ actions:
           | list }}'
     - if:
       - condition: template
-        value_template: '{{ attempts | count >= 3 }}'
+        value_template: '{{ attempts | count >= 10 }}'
       then:
       - action: persistent_notification.create
         data:
           notification_id: eufy_dock_retry
           title: Eufy docking recovery
-          message: 'Eufy docking recovery stopped: three retry commands have been
+          message: 'Eufy docking recovery stopped: ten retry commands have been
             attempted in the last 30 minutes. The robot still needs attention.'
-      - stop: Three retries in 30 minutes already attempted
+      - stop: Ten retries in 30 minutes already attempted
     - variables:
-        wait_seconds: '{{ ([0, attempts[-1] + 600 - as_timestamp(now())] | max | round(0,
+        wait_seconds: '{{ ([0, attempts[-1] + 180 - as_timestamp(now())] | max | round(0,
           ''ceil'') | int) if attempts else 0 }}'
     - if:
       - condition: template
@@ -148,5 +148,5 @@ actions:
     data:
       notification_id: eufy_dock_retry
       title: Eufy docking recovery
-      message: 'Eufy docking recovery stopped: three retry commands have been attempted
+      message: 'Eufy docking recovery stopped: ten retry commands have been attempted
         in the last 30 minutes. The robot still needs attention.'

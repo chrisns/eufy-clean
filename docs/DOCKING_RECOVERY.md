@@ -55,8 +55,8 @@ It uses only the robot's built-in commands:
 
 It never starts a new whole-home clean or steers the robot manually. Every
 reported code must be E74, E75 or E76, and the vacuum must still be in `error`.
-The first fault must persist for 30 seconds. There are at most three command
-attempts in any rolling 30-minute window, at least ten minutes apart; a command
+The first fault must persist for 30 seconds. There are at most ten command
+attempts in any rolling 30-minute window, at least three minutes apart; a command
 is counted before it is sent, including a failed service call. The automation
 runs once at a time, cancels a waiting retry on recovery or another fault, and
 stops with a persistent notification when its budget is exhausted. A fault that
@@ -72,18 +72,34 @@ installer is `infra/ha/eufy-dock-retry/apply.py`; it preserves existing history.
 The automation is editable and can be disabled in HA's Automations UI.
 
 The regression tests execute the actual HA automation/script engine with
-synthetic vacuum states and a fake robot service. They cover recovery, a fourth
+synthetic vacuum states and a fake robot service. They cover recovery, an eleventh
 attempt, expiry, malformed history, mixed physical/docking faults and cancellation
 while waiting. No physical fault is induced just to test retries.
 
 ## Deployment verification
 
 The reviewed runtime and error changes were deployed to HA together in one full
-restart. `sensor.eufy_clean_error_code` now reports `None`, and `vacuum.robovac`
-reports a healthy resumed cleaning state with active code/raw code 0. The
+restart. The sensor reported `None` after recovery, and `vacuum.robovac`
+reported a healthy resumed cleaning state with active code/raw code 0. The
 installed automation `automation.eufy_retry_failed_docking_three_in_30_minutes`
 is enabled. A live trigger with conditions enforced dispatched no command while
-healthy and left `input_text.eufy_dock_retry_history` at `[]`. The code and
-example pass 742 tests and all repository hooks. The next real docking failure
-will provide hardware evidence of the automatic retry; a synthetic physical
-fault was not induced for this validation.
+healthy and left `input_text.eufy_dock_retry_history` at `[]`.
+
+Real docking failures subsequently exercised the original three-retry policy.
+The traces show `resume` calls at 18:34:13 and 18:44:13 UTC on 2026-10-11,
+followed about three seconds later by the robot changing from `error` to
+`returning`. The third call at 19:01:39 completed without an HA service error,
+but did not produce a healthy state. The automation stopped at its three-command
+rolling limit and posted its persistent notification; detection had worked.
+
+At the owner's request, the policy was increased to ten attempts per rolling
+30 minutes, three minutes apart. Reloading automations required no HA restart
+and preserved the existing retry history. An owner-requested immediate resume
+at 19:28:38 UTC was counted through this updated automation. The robot reported
+`returning` at 19:28:41 and `docked` at 19:28:52, with raw work state 9 and active
+code/raw code 0. A later update reported Washing Mop at the station. The old
+retry-limit notification was dismissed after confirming recovery. No manual
+steering was used. This confirms one successful
+resume-to-station recovery under the updated policy, not ten physical attempts.
+The code and example pass 742 tests and all repository hooks; no synthetic
+physical fault was induced.
