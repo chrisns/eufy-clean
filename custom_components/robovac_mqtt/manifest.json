@@ -1,6 +1,9 @@
 {
   "domain": "robovac_mqtt",
   "name": "Eufy Robovac MQTT",
+  "after_dependencies": [
+    "ffmpeg"
+  ],
   "codeowners": [
     "@jeppesens",
     "@m11tch"
@@ -18,11 +21,7 @@
     "paho.mqtt"
   ],
   "requirements": [
-    "Pillow>=10.0.0",
     "tinytuya>=1.18.0,<2.0.0"
   ],
-  "version": "1.13.1",
-  "after_dependencies": [
-    "ffmpeg"
-  ]
+  "version": "1.13.1"
 }

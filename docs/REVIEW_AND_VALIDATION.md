@@ -35,6 +35,9 @@ camera evidence.
 
 ## Findings fixed in this review
 
+- Sorted the integration manifest and removed Pillow from its requirements;
+  Home Assistant already supplies Pillow and hassfest rejects duplicate core
+  dependencies.
 - Removed the five-variant, two-pass camera-start ladder and its diagnostics.
   Production sends the proven channel-0 HD sequence once, with a fixed startup
   timeout. The abandoned candidates are recorded below, not shipped as fallbacks.
@@ -94,6 +97,12 @@ sanitized equivalent of upstream `baeb32c` was `1799997`: their runtime trees
 were identical and only two synthetic test-fixture files differed. A normal
 merge retaining the feature tree restored the actual upstream base as an
 ancestor. No force push or reintroduction of private fixtures was needed.
+
+Upstream PR workflows require maintainer approval for this contributor. The fork
+HACS check also flags repository metadata: issues are disabled and topics are
+missing on the fork; GitHub cannot identify the license on either repository
+(`NOASSERTION`). These are separate from the passing integration manifest and
+HACS metadata checks; the existing license is not changed by this PR.
 
 The HA camera and movement evidence was obtained before this maintenance review.
 The reviewed transport received an additional live map check; the camera startup
