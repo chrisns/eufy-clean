@@ -72,6 +72,9 @@ class P2PMapFeed:
         self._session: P2PSession | None = None
         self._wake = asyncio.Event()
         self._failures_in_a_row = 0
+        # The robot serves ONE P2P session at a time and refuses any other, so the map
+        # feed and the camera take turns: whoever opens a session holds this.
+        self.session_slot = asyncio.Lock()
         self.connected = False
         self.last_object_at: float | None = None
         self.sessions = 0
@@ -174,6 +177,10 @@ class P2PMapFeed:
                 pass
 
     async def _run_session(self) -> None:
+        async with self.session_slot:
+            await self._run_session_in_slot()
+
+    async def _run_session_in_slot(self) -> None:
         rtc = await self.get_rtc()
         self.decoder.start_session()
         self._session = P2PSession(

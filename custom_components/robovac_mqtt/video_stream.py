@@ -29,6 +29,7 @@ from .const import VIDEO_MGR_STREAM_OPEN
 
 if TYPE_CHECKING:
     from .coordinator import EufyCleanCoordinator
+    from .p2p_map import P2PMapFeed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ _STALL_SECONDS = 10.0  # no new frame for this long -> restart the session
 # Each attempt fetches a cloud config that reserves a slot on the robot until used,
 # so a refusing robot is retried rarely, not hammered.
 _RETRY_BACKOFF = (5.0, 30.0, 300.0, 600.0)
+_SLOT_WAIT = 45.0  # how long to wait for the map feed to finish its session
 # A robot that refuses a session refuses for longer the more it is asked.
 _REFUSAL_BACKOFF = 30 * 60
 _JPEG_START, _JPEG_END = b"\xff\xd8", b"\xff\xd9"
@@ -192,8 +194,17 @@ class RobotVideo:
             # The robot refuses to open its camera while it works, and a session that
             # is refused only makes it refuse longer, so do not even start one.
             raise HomeAssistantError("The robot is busy; its camera is only available when idle")
-        rtc = await feed.get_rtc()
+        try:
+            await asyncio.wait_for(feed.session_slot.acquire(), _SLOT_WAIT)
+        except TimeoutError as err:
+            raise HomeAssistantError("The robot is busy with the map; try again in a moment") from err
+        try:
+            await self._stream_in_slot(feed)
+        finally:
+            feed.session_slot.release()
 
+    async def _stream_in_slot(self, feed: P2PMapFeed) -> None:
+        rtc = await feed.get_rtc()
         ffmpeg = await asyncio.create_subprocess_exec(
             _ffmpeg_binary(self._hass),
             *FFMPEG_ARGS,
@@ -215,7 +226,7 @@ class RobotVideo:
         )
         self.sessions += 1
         reader = asyncio.ensure_future(self._read_frames(ffmpeg.stdout))
-        watchdog = asyncio.ensure_future(self._watch_stall())
+        watchdog = asyncio.ensure_future(self._watch_stall(session.connect_timeout))
         runner = asyncio.ensure_future(session.run())
         try:
             done, _ = await asyncio.wait({runner, reader, watchdog}, return_when=asyncio.FIRST_COMPLETED)
@@ -248,12 +259,15 @@ class RobotVideo:
                 del buffer[: end + 2]
         raise P2PError("the video decoder stopped")
 
-    async def _watch_stall(self) -> None:
+    async def _watch_stall(self, first_frame_allowance: float) -> None:
+        """End the stream if no frame arrives: the session gets as long as it needs to
+        walk its start variants for the first frame, then ``_STALL_SECONDS`` between."""
         started = time.monotonic()
         while True:
             await asyncio.sleep(1)
             idle = time.monotonic() - max(self._frame_at, started)
-            if idle > max(_STALL_SECONDS, FIRST_FRAME_TIMEOUT if self._frame_at < started else 0):
+            allowance = first_frame_allowance if self._frame_at < started else _STALL_SECONDS
+            if idle > allowance:
                 raise P2PError(f"no video frames for {idle:.0f}s")
 
     # -- the robot's video manager (DP 181) --------------------------------

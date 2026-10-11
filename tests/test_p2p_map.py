@@ -366,3 +366,20 @@ async def test_a_refused_session_triggers_a_long_cooldown_after_just_one(hass, f
         await _until(lambda: waits)
         await feed.stop()
     assert waits[0] == p2p_map._REFUSAL_COOLDOWN
+
+
+@pytest.mark.asyncio
+async def test_the_map_session_holds_the_slot_so_the_camera_cannot_overlap_it(hass, fake_session):
+    seen: list[bool] = []
+    feed = _feed(hass, active=False)
+
+    async def run(self):
+        seen.append(feed.session_slot.locked())
+
+    fake_session.run = run
+    fake_session.script = [[]]
+    feed.start()
+    await _until(lambda: seen)
+    await feed.stop()
+    assert seen == [True]
+    assert not feed.session_slot.locked()

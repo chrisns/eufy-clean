@@ -564,3 +564,31 @@ def test_other_disconnects_are_ordinary_failures(reason, connected):
 def test_the_camera_waits_a_long_time_after_a_refusal_and_backs_off_otherwise():
     assert retry_delay(refused=True, attempt=0) == 30 * 60
     assert [retry_delay(refused=False, attempt=n) for n in range(6)] == [5.0, 30.0, 300.0, 600.0, 600.0, 600.0]
+
+
+# -- one session at a time --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_camera_waits_for_the_map_feed_to_release_the_session_slot(video, coordinator, monkeypatch):
+    """The robot serves one P2P session at a time and refuses any other."""
+    feed = MagicMock()
+    feed.session_slot = asyncio.Lock()
+    feed.get_rtc = AsyncMock()
+    coordinator.p2p = feed
+    monkeypatch.setattr("custom_components.robovac_mqtt.video_stream._SLOT_WAIT", 0.05)
+    await feed.session_slot.acquire()  # the map feed has a session open
+    with pytest.raises(HomeAssistantError, match="busy with the map"):
+        await video._stream_once()
+    feed.get_rtc.assert_not_awaited()  # no cloud config fetched, no slot burned on the robot
+
+
+@pytest.mark.asyncio
+async def test_the_slot_is_released_when_the_stream_ends(video, coordinator):
+    feed = MagicMock()
+    feed.session_slot = asyncio.Lock()
+    coordinator.p2p = feed
+    video._stream_in_slot = AsyncMock(side_effect=HomeAssistantError("ended"))
+    with pytest.raises(HomeAssistantError, match="ended"):
+        await video._stream_once()
+    assert not feed.session_slot.locked()
