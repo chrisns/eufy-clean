@@ -74,8 +74,9 @@ def _io_control(request_id: int, command: int, op: int, *args: int) -> bytes:
 
 
 # IOCtrl sequences that ask the robot to start video, in the order to try them. The
-# first is the one proven on an S1 Pro (clarity, then two video-channel starts); the
-# others are the variants seen in the Tuya IPC SDK, tried in the same session if the
+# first uses HD clarity, then two video-channel starts. On the S1 Pro, SD clarity
+# (2) can omit periodic keyframes and leave the decoder frozen; HD (4) sustains
+# the 800x600 stream. The other variants are tried in the same session if the
 # first draws no video.
 VIDEO_START_VARIANTS: tuple[str, ...] = ("b", "c", "a", "d", "e")
 
@@ -93,7 +94,7 @@ def video_start_variant(variant: str) -> list[bytes]:
     """The IOCtrl requests of one start variant (see ``VIDEO_START_VARIANTS``)."""
     return {
         "a": [_io_control(2, 6, 3, 0, 3)],
-        "b": [_io_control(2, 9, 0, 0, 2), _io_control(3, 6, 0, 0, 0), _io_control(4, 6, 4, 0, 4)],
+        "b": [_io_control(2, 9, 0, 0, 4), _io_control(3, 6, 0, 0, 0), _io_control(4, 6, 4, 0, 4)],
         "c": [_io_control(2, 9, 0, 1, 4), _io_control(3, 6, 0, 1, 0), _io_control(4, 6, 4, 1, 4)],
         "d": [_io_control(2, 6, 3, 1, 3)],
         "e": [_io_control(2, 6, 1, 0, 0), _io_control(3, 6, 2, 0, 0)],

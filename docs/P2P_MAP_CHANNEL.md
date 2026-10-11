@@ -152,6 +152,27 @@ Path points are 5 bytes: `x i16 BE | y i16 BE | flags` (cm). Flags low nibble:
 6. ACK every conv-5 PUSH (tagged), reassemble records by `sn`/`frg`, decrypt,
    split into chunks, decode the objects.
 
+## Robot camera (S1 Pro)
+
+The camera uses conversation 1 for RTP/H.265. Enable it physically on the robot
+first, then enter manual control (`WorkStatus.state == 6`). Home Assistant maps
+that state to activity `cleaning`, so camera availability must use the raw state.
+Viewing the camera does not enter or exit manual control. Leaving manual control
+ends the stream and stops cached frames from being returned.
+
+The DP 181 state-set request needs
+`setting{mgrState{passEn: Switch{value: true}}}`. An extra message wrapper is
+acknowledged successfully but leaves `passEn` false. After authenticating the P2P
+control channel, set `passEn`, send `StreamOpen`, then send the video-start burst.
+A failed stream-open acknowledgement is advisory; the start requests still run.
+
+Use HD clarity (`IOCtrl` command 9, channel 0, value 4) before the video starts.
+With SD clarity (value 2), captures on this robot omitted periodic IDR keyframes:
+RTP packets continued with no sequence gaps, but ffmpeg could not decode later
+pictures. HD retained every keyframe in a full-minute live test at 800x600, 10 fps,
+with no decoder errors. The video watchdog checks decoded JPEG progress, so
+incoming packets alone cannot keep a frozen session alive indefinitely.
+
 ## The cloud config is single-use
 
 `m.ipc.v4.rtc.config.get` returns, besides the device password and the ICE

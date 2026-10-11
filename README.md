@@ -48,7 +48,7 @@ Map size (256/512/1024/2048 px) and robot marker style configurable via integrat
 
 - **Switched on at the robot, never from Home Assistant.** The camera is off until you hold **Start/Pause** and **Recharge** together for 10 seconds on the robot. The integration only reads that switch (`binary_sensor.<device>_camera_enabled`); the camera entity is unavailable while it is off.
 - **Only streams while someone is looking.** The first viewer opens the stream, it stays warm for 20 seconds, and the last viewer to leave closes it again.
-- **The robot decides when.** It refuses to open the stream while it is cleaning (the camera is busy navigating); the entity reports the refusal in `last_error`.
+- **Manual control must be enabled.** Start it with `vacuum.send_command` and `command: start_remote`; end it with `command: stop_remote`. The camera is unavailable outside manual control and never changes the mode itself. Leaving manual control closes the stream and prevents cached images from being returned.
 - **Night views are dark.** There is no light on the robot.
 
 ### Vacuum Control

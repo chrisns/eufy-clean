@@ -12,7 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, WORK_STATE_REMOTE_CTRL
 from .coordinator import EufyCleanCoordinator
 from .entity import API_TYPE_NOVEL, filter_supported_entities
 from .video_stream import RobotVideo
@@ -138,7 +138,8 @@ class EufyVideoCamera(CoordinatorEntity[EufyCleanCoordinator], Camera):
 
     The robot only streams after its camera has been switched on at the robot
     (hold Start/Pause and Recharge for 10 s), which is what this entity mirrors: it
-    is unavailable until then. Viewing it opens the stream; the last viewer to leave
+    is unavailable until then and while manual control is disabled. The camera
+    never changes the robot's control mode. Viewing it opens the stream; the last viewer to leave
     closes it again after a short linger.
     """
 
@@ -157,7 +158,11 @@ class EufyVideoCamera(CoordinatorEntity[EufyCleanCoordinator], Camera):
 
     @property
     def available(self) -> bool:
-        return super().available and self.coordinator.data.camera_enabled is True
+        return (
+            super().available
+            and self.coordinator.data.camera_enabled is True
+            and self.coordinator.data.status_code == WORK_STATE_REMOTE_CTRL
+        )
 
     @property
     def is_streaming(self) -> bool:
@@ -165,7 +170,10 @@ class EufyVideoCamera(CoordinatorEntity[EufyCleanCoordinator], Camera):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        attrs: dict[str, Any] = {"camera_switch": self.coordinator.data.camera_enabled}
+        attrs: dict[str, Any] = {
+            "camera_switch": self.coordinator.data.camera_enabled,
+            "manual_control": self.coordinator.data.status_code == WORK_STATE_REMOTE_CTRL,
+        }
         if (age := self._video.frame_age) is not None:
             attrs["frame_age_seconds"] = round(age, 1)
         if self._video.last_error:

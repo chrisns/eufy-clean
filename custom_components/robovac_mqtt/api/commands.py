@@ -90,16 +90,15 @@ REMOTE_DIRECTIONS: dict[str, RemoteCtrl.Direction] = {
 def build_video_manager_command(method: int, *, pass_enable: bool | None = None) -> dict[str, str]:
     """A DP 181 ``VideoMgrRequest{control{method, seq}, setting}`` for the S1 Pro's camera.
 
-    ``pass_enable`` adds ``setting{mgrState{passEn}}``: the robot refuses ``StreamOpen``
-    until it has been set on (observed: five refusals, then success right after
-    setting it; and refusals again after a reboot reset it).
+    ``pass_enable`` adds ``setting{mgrState{passEn: Switch{value}}}``. There are
+    two message wrappers inside ``setting``; an extra wrapper silently leaves
+    the robot's passEn false even though it acknowledges the state-set.
     """
     control = bytes([0x08, method, 0x10, 0x01])  # method = 1, seq = 2
     body = bytes([0x0A, len(control)]) + control  # control = 1
     if pass_enable is not None:
-        pass_en = bytes([0x0A, 0x02, 0x08, int(pass_enable)])  # passEn = 1: Switch{value}
-        mgr_state = bytes([0x0A, len(pass_en)]) + pass_en  # mgrState = 1
-        setting = bytes([0x0A, len(mgr_state)]) + mgr_state  # setting.mgrState... wrapped below
+        mgr_state = bytes([0x0A, 0x02, 0x08, int(pass_enable)])  # passEn = 1: Switch{value}
+        setting = bytes([0x0A, len(mgr_state)]) + mgr_state  # setting.mgrState = 1
         body += bytes([0x12, len(setting)]) + setting  # setting = 2
     return {DPS_MAP["VIDEO_MANAGER"]: base64.b64encode(encode_varint(len(body)) + body).decode()}
 

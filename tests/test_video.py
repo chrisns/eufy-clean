@@ -3,6 +3,7 @@
 # pylint: disable=redefined-outer-name,protected-access
 
 import asyncio
+import base64
 import shutil
 import struct
 import subprocess
@@ -13,7 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.robovac_mqtt.api.commands import build_command
+from custom_components.robovac_mqtt.api.commands import (
+    build_command,
+    build_video_manager_command,
+)
 from custom_components.robovac_mqtt.api.p2p import P2PError, P2PRefused, control, kcp
 from custom_components.robovac_mqtt.api.p2p.framing import CMD_RTC, decode_frames
 from custom_components.robovac_mqtt.api.p2p.video import (
@@ -24,6 +28,7 @@ from custom_components.robovac_mqtt.api.p2p.video import (
     VideoSession,
 )
 from custom_components.robovac_mqtt.api.parser import (
+    _decode_raw_varints,
     _parse_video_manager_reply,
     update_state,
 )
@@ -34,8 +39,11 @@ from custom_components.robovac_mqtt.camera import (
 from custom_components.robovac_mqtt.const import (
     VIDEO_MGR_STATE_SET,
     VIDEO_MGR_STREAM_OPEN,
+    WORK_STATE_REMOTE_CTRL,
 )
 from custom_components.robovac_mqtt.models import VacuumState
+from custom_components.robovac_mqtt.proto.cloud.common_pb2 import Switch
+from custom_components.robovac_mqtt.utils import decode_varint
 from custom_components.robovac_mqtt.video_stream import (
     FFMPEG_ARGS,
     RobotVideo,
@@ -132,7 +140,7 @@ def test_video_start_packets_are_auth_hello_caps_and_three_iocontrols():
         (0, 0x0A), (0, 0x15), (0x10002, 9), (0x10003, 6), (0x10004, 0x40006),
     ]
     assert parsed[1].payload.endswith(b"}\x00") and b"capability_exchange_req" in parsed[1].payload
-    assert parsed[2].payload == struct.pack("<II", 0, 2)
+    assert parsed[2].payload == struct.pack("<II", 0, 4)  # HD keeps periodic keyframes flowing
 
 
 def test_video_session_hands_nal_units_out_and_counts_as_connected():
@@ -150,9 +158,27 @@ def test_video_session_hands_nal_units_out_and_counts_as_connected():
 
 
 def test_stream_commands_match_the_bytes_sent_to_a_real_robot():
-    assert build_command("video_pass_enable") == {"181": "EAoECAIQARIICgYKBAoCCAE="}
+    assert build_command("video_pass_enable") == {"181": "DgoECAIQARIGCgQKAggB"}
     assert build_command("video_stream_open") == {"181": "BgoECAMQAQ=="}
     assert build_command("video_stream_close") == {"181": "BgoECAQQAQ=="}
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_pass_enable_decodes_as_a_switch_value(enabled):
+    """Decode the iOS schema's setting -> mgrState -> passEn, using protobuf's Switch.
+
+    The extra wrapper used by the old command was accepted by the robot but
+    protobuf treated its value as an unknown field, leaving passEn false.
+    """
+    raw = base64.b64decode(build_video_manager_command(2, pass_enable=enabled)["181"])
+    length, pos = decode_varint(raw, 0)
+    assert length == len(raw) - pos
+    request = _decode_raw_varints(raw[pos:])
+    setting = _decode_raw_varints(request[2])
+    manager = _decode_raw_varints(setting[1])
+    switch = Switch.FromString(manager[1])
+    assert switch.value is enabled
+    assert set(manager) == {1}  # never change the separate locked switch
 
 
 @pytest.mark.parametrize(
@@ -183,7 +209,7 @@ def test_update_state_records_the_video_reply_with_a_timestamp():
 def coordinator():
     coord = MagicMock()
     coord.device_name = "Test Vac"
-    coord.data = VacuumState(api_type="novel", camera_enabled=True)
+    coord.data = VacuumState(api_type="novel", camera_enabled=True, status_code=WORK_STATE_REMOTE_CTRL)
     coord.build_device_command = MagicMock(side_effect=lambda name: {"181": name})
     coord.async_send_command = AsyncMock()
     return coord
@@ -540,14 +566,18 @@ async def test_no_further_variants_are_sent_once_video_flows(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_stream_open_ends_the_session_without_sending_video_starts():
+async def test_a_refused_stream_open_does_not_stop_the_video_start(monkeypatch):
+    """The stream-open is advisory: a session that ignored its refusal still got video from a real robot."""
+    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.VARIANT_WAIT", 0.01)
+    monkeypatch.setattr("custom_components.robovac_mqtt.api.p2p.video.STREAM_SETTLE", 0.01)
+
     async def refuse():
         raise HomeAssistantError("refused")
 
     session, conversation = _video_session(open_stream=refuse)
     await session._start_video()
-    assert len(conversation.sent) == 3
-    assert isinstance(session._failure, HomeAssistantError)
+    assert len(conversation.sent) > 3  # the start variants were sent regardless
+    assert session._failure is None
 
 
 def test_the_first_variant_is_the_one_proven_on_a_real_robot():
@@ -637,3 +667,55 @@ async def test_a_new_viewer_does_not_wake_a_stream_the_robot_is_refusing(video):
     async with video.hold():
         pass
     assert not video._kick.is_set()
+
+
+@pytest.mark.parametrize("status", [0, 2, 3, 5, 7, 9])
+def test_camera_is_unavailable_outside_manual_control(coordinator, video, status):
+    coordinator.data = VacuumState(camera_enabled=True, status_code=status)
+    camera = make_camera(coordinator, video)
+    assert camera.available is False
+    assert camera.extra_state_attributes["manual_control"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_session_or_viewer_is_started_outside_manual_control(video, coordinator):
+    coordinator.data = VacuumState(camera_enabled=True, status_code=0)
+    video._ensure_running = MagicMock()
+    with pytest.raises(HomeAssistantError, match="manual control"):
+        async with video.hold():
+            pytest.fail("must not view the camera outside manual control")
+    video._ensure_running.assert_not_called()
+    assert video._holders == 0
+    coordinator.p2p.acquire_slot = AsyncMock()
+    with pytest.raises(HomeAssistantError, match="manual control"):
+        await video._stream_once()
+    coordinator.p2p.acquire_slot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_old_frame_is_not_returned_after_manual_control_ends(video, coordinator):
+    video._frame, video._frame_at = b"jpeg", time.monotonic()
+    coordinator.data = VacuumState(camera_enabled=True, status_code=0)
+    assert await video.wait_for_frame(timeout=1) is None
+    assert await video.latest() is None
+
+
+@pytest.mark.asyncio
+async def test_stream_exits_without_retrying_when_manual_control_ends(video, coordinator):
+    async def leave_mode():
+        coordinator.data = VacuumState(camera_enabled=True, status_code=0)
+        raise P2PError("manual control ended")
+    video._stream_once = AsyncMock(side_effect=leave_mode)
+    video._close_robot_stream = AsyncMock()
+    await asyncio.wait_for(video._run(), 0.5)
+    video._stream_once.assert_awaited_once()
+    video._close_robot_stream.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_is_allowed_even_when_ha_calls_its_activity_cleaning(video, coordinator):
+    coordinator.data = VacuumState(camera_enabled=True, status_code=WORK_STATE_REMOTE_CTRL, activity="cleaning")
+    coordinator.p2p.acquire_slot = AsyncMock(side_effect=TimeoutError)
+    with pytest.raises(HomeAssistantError, match="busy with the map"):
+        await video._stream_once()
+    coordinator.p2p.acquire_slot.assert_awaited_once()

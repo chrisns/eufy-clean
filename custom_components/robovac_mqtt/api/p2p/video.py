@@ -158,7 +158,13 @@ class VideoSession(P2PSession):
             for packet in control.video_prelude_packets(self._device_password, self._local_key):
                 conversation.send(packet)
             if self._open_stream is not None:
-                await self._open_stream()
+                try:
+                    await self._open_stream()
+                except Exception as err:  # noqa: BLE001 - the stream-open is advisory
+                    # A video session that ignored a refused stream-open (and got
+                    # no reply to it) still streamed on a real robot, so keep going
+                    # and let the start requests decide.
+                    _LOGGER.debug("p2p: stream-open not confirmed (%s); asking for video anyway", err)
             await asyncio.sleep(STREAM_SETTLE if self._open_stream is not None else 0.2)
             for variant in control.VIDEO_START_VARIANTS * VARIANT_PASSES:
                 if self._first_object.is_set():

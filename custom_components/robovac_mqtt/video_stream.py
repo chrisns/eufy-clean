@@ -25,7 +25,7 @@ from homeassistant.helpers.event import async_call_later
 
 from .api.p2p import P2PError, P2PRefused
 from .api.p2p.video import VideoSession
-from .const import VIDEO_MGR_STATE_SET, VIDEO_MGR_STREAM_OPEN
+from .const import VIDEO_MGR_STATE_SET, VIDEO_MGR_STREAM_OPEN, WORK_STATE_REMOTE_CTRL
 
 if TYPE_CHECKING:
     from .coordinator import EufyCleanCoordinator
@@ -114,6 +114,8 @@ class RobotVideo:
                 "The robot's camera is switched off. Hold Start/Pause and Recharge on the "
                 "robot for 10 seconds to turn it on."
             )
+        if self._coordinator.data.status_code != WORK_STATE_REMOTE_CTRL:
+            raise HomeAssistantError("Enable manual control before viewing the robot camera")
         self._holders += 1
         self._cancel_linger()
         self._ensure_running()
@@ -130,6 +132,8 @@ class RobotVideo:
         """Return a fresh JPEG, waiting for the first one if the stream is starting."""
         deadline = time.monotonic() + timeout
         while True:
+            if self._coordinator.data.status_code != WORK_STATE_REMOTE_CTRL:
+                return None
             if self._frame is not None and time.monotonic() - self._frame_at < _STALL_SECONDS:
                 return self._frame
             remaining = deadline - time.monotonic()
@@ -140,7 +144,7 @@ class RobotVideo:
                 await asyncio.wait_for(self._frame_event.wait(), remaining)
 
     async def latest(self) -> bytes | None:
-        return self._frame
+        return self._frame if self._coordinator.data.status_code == WORK_STATE_REMOTE_CTRL else None
 
     async def stop(self) -> None:
         self._cancel_linger()
@@ -180,6 +184,8 @@ class RobotVideo:
                 except (HomeAssistantError, P2PError, OSError) as err:
                     self.last_error = str(err)
                     refused = isinstance(err, P2PRefused)
+                    if self._coordinator.data.status_code != WORK_STATE_REMOTE_CTRL:
+                        break  # mode changed: close the camera, without changing the robot's mode
                     _LOGGER.debug("Video stream for %s ended: %s", self._coordinator.device_name, err)
                 delay = retry_delay(refused=refused, attempt=attempt)
                 attempt += 1
@@ -198,10 +204,12 @@ class RobotVideo:
         feed = coordinator.p2p
         if feed is None:
             raise HomeAssistantError("No local P2P connection to the robot")
-        if coordinator.data.activity in ("cleaning", "returning"):
-            # The robot refuses to open its camera while it works, and a session that
-            # is refused only makes it refuse longer, so do not even start one.
-            raise HomeAssistantError("The robot is busy; its camera is only available when idle")
+        if coordinator.data.status_code != WORK_STATE_REMOTE_CTRL:
+            # HA maps remote control to activity="cleaning", so the raw mode is
+            # authoritative here. Never reserve a session outside manual control.
+            if coordinator.data.activity in ("cleaning", "returning"):
+                raise HomeAssistantError("The robot is busy; enable manual control before viewing its camera")
+            raise HomeAssistantError("Enable manual control before viewing the robot camera")
         try:
             await feed.acquire_slot(_SLOT_WAIT)
         except TimeoutError as err:
@@ -273,6 +281,8 @@ class RobotVideo:
         started = time.monotonic()
         while True:
             await asyncio.sleep(1)
+            if self._coordinator.data.status_code != WORK_STATE_REMOTE_CTRL:
+                raise HomeAssistantError("Manual control ended; closing the robot camera")
             idle = time.monotonic() - max(self._frame_at, started)
             allowance = first_frame_allowance if self._frame_at < started else _STALL_SECONDS
             if idle > allowance:
@@ -281,7 +291,7 @@ class RobotVideo:
     # -- the robot's video manager (DP 181) --------------------------------
 
     async def _open_robot_stream(self) -> None:
-        """Set ``passEn`` and open the stream; the robot refuses the latter without the former."""
+        """Set ``passEn`` and open the stream while manual control is enabled."""
         await self._video_command("video_pass_enable", VIDEO_MGR_STATE_SET)
         await self._video_command("video_stream_open", VIDEO_MGR_STREAM_OPEN)
 
