@@ -194,9 +194,9 @@ def build_scene_clean_command(scene_id: int) -> dict[str, str]:
 
 
 def build_room_clean_command(
-    room_ids: list[int], map_id: int = 3, mode: str = "GENERAL"
+    room_ids: list[int], map_id: int = 3, mode: str = "GENERAL", *, model: str = ""
 ) -> dict[str, str]:
-    """Build command to clean specific rooms."""
+    """Build a room clean; T2080A uses zero-based room-order slots."""
     if mode == "CUSTOMIZE":
         proto_mode = SelectRoomsClean.CUSTOMIZE
     else:
@@ -204,7 +204,8 @@ def build_room_clean_command(
 
     rooms_clean = SelectRoomsClean(
         rooms=[
-            SelectRoomsClean.Room(id=rid, order=i + 1) for i, rid in enumerate(room_ids)
+            SelectRoomsClean.Room(id=rid, order=i)
+            for i, rid in enumerate(room_ids, start=0 if model == "T2080A" else 1)
         ],
         mode=proto_mode,
         clean_times=1,
@@ -737,6 +738,7 @@ def build_command(
             kwargs.get("room_ids", []),
             kwargs.get("map_id", 3),
             kwargs.get("mode", "GENERAL"),
+            model=kwargs.get("model", ""),
         )
     if cmd == "zone_clean":
         return build_zone_clean_command(

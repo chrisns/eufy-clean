@@ -14,6 +14,8 @@ from custom_components.robovac_mqtt.api.map_stream import MapData
 from custom_components.robovac_mqtt.const import WORK_STATE_REMOTE_CTRL
 from custom_components.robovac_mqtt.coordinator import EufyCleanCoordinator
 from custom_components.robovac_mqtt.models import VacuumState
+from custom_components.robovac_mqtt.proto.cloud.control_pb2 import ModeCtrlRequest
+from custom_components.robovac_mqtt.utils import decode
 
 # pylint: disable=redefined-outer-name
 
@@ -703,3 +705,16 @@ def test_s1_pro_remote_command_uses_its_model_context(mock_hass, mock_login):
     coordinator = EufyCleanCoordinator(mock_hass, mock_login, device_info)
     assert coordinator.build_device_command("remote_move", direction="left") == {"155": "BBICCAM="}
     assert coordinator.build_device_command("remote_move", direction="brake") == {"155": "AhIA"}
+
+
+@pytest.mark.parametrize("connection_type", ["local", "cloud"])
+def test_s1_pro_room_command_uses_its_model_context(mock_hass, mock_login, connection_type):
+    """Room entities need no model override to get the T2080A's zero-based slots."""
+    device_info = {
+        "deviceId": "dev1", "deviceModel": "T2080A", "deviceName": "Vac",
+        "apiType": "novel", "connection_type": connection_type,
+    }
+    coordinator = EufyCleanCoordinator(mock_hass, mock_login, device_info)
+    command = coordinator.build_device_command("room_clean", room_ids=[6, 2], map_id=7)
+    rooms = decode(ModeCtrlRequest, command["152"]).select_rooms_clean.rooms
+    assert [(room.id, room.order) for room in rooms] == [(6, 0), (2, 1)]

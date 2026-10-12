@@ -32,6 +32,7 @@ from custom_components.robovac_mqtt.const import (
 from custom_components.robovac_mqtt.proto.cloud.control_pb2 import (
     ModeCtrlRequest,
     RemoteCtrl,
+    SelectRoomsClean,
 )
 from custom_components.robovac_mqtt.proto.cloud.multi_maps_pb2 import (
     MultiMapsManageRequest,
@@ -87,6 +88,38 @@ def test_set_child_lock_command():
     assert DPS_MAP["UNSETTING"] in result
     decoded = decode(UnisettingRequest, result[DPS_MAP["UNSETTING"]])
     assert decoded.children_lock.value is True
+
+
+@pytest.mark.parametrize("room_ids", [[8], [6, 2], [0], [2, 0, 6]])
+@pytest.mark.parametrize("mode", ["GENERAL", "CUSTOMIZE"])
+@pytest.mark.parametrize("tuya_transport", [False, True])
+def test_s1_pro_room_clean_uses_zero_based_slots(room_ids, mode, tuya_transport):
+    """T2080A uses order as a slot; leaving slot zero empty selects room zero."""
+    command = build_command(
+        "room_clean", model="T2080A", tuya_transport=tuya_transport,
+        room_ids=room_ids, map_id=7, mode=mode,
+    )
+    request = decode(ModeCtrlRequest, command[DPS_MAP["PLAY_PAUSE"]])
+    assert request.method == EUFY_CLEAN_CONTROL.START_SELECT_ROOMS_CLEAN
+    rooms_clean = request.select_rooms_clean
+    assert rooms_clean.map_id == 7
+    assert rooms_clean.clean_times == 1
+    assert rooms_clean.mode == (SelectRoomsClean.CUSTOMIZE if mode == "CUSTOMIZE" else SelectRoomsClean.GENERAL)
+    assert [(room.id, room.order) for room in rooms_clean.rooms] == [
+        (room_id, slot) for slot, room_id in enumerate(room_ids)
+    ]
+
+
+@pytest.mark.parametrize("model", ["", "T2351", "T2080"])
+@pytest.mark.parametrize("tuya_transport", [False, True])
+def test_other_models_keep_one_based_room_order(model, tuya_transport):
+    """The verified T2080A fix must not change other models or unknown callers."""
+    command = build_command(
+        "room_clean", model=model, tuya_transport=tuya_transport,
+        room_ids=[6, 0, 2], map_id=4,
+    )
+    rooms = decode(ModeCtrlRequest, command[DPS_MAP["PLAY_PAUSE"]]).select_rooms_clean.rooms
+    assert [(room.id, room.order) for room in rooms] == [(6, 1), (0, 2), (2, 3)]
 
 
 # ── zone (select-zones) clean ────────────────────────────────────────

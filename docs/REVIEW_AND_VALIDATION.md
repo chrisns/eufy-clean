@@ -134,3 +134,26 @@ E30/raw 19923712 mappings from the vendor app. Active errors now clear on a
 confirmed healthy WorkStatus and retain last-error diagnostics. The tested
 ten-attempt/30-minute HA automation and its deployment details are in
 [DOCKING_RECOVERY.md](DOCKING_RECOVERY.md).
+
+## Room-order review follow-up
+
+On 2026-10-12, [a PR reviewer](https://github.com/jeppesens/eufy-clean/pull/182#issuecomment-6119165143)
+confirmed the [T2080A room-order fault reported in #170](https://github.com/jeppesens/eufy-clean/issues/170#issuecomment-6030552049):
+requesting rooms `[6, 2]` cleaned `[0, 6]`. T2080A treats
+`SelectRoomsClean.Room.order` as a zero-based slot. Starting at one leaves slot
+zero empty and drops the final requested room. Both reporters verified that
+starting at zero targets the requested rooms in the requested order.
+
+The command builder now receives the model context already supplied by the
+coordinator and uses zero-based slots for T2080A. Other models and callers
+without model context retain their existing one-based order; the reports do
+not establish other models' firmware behavior. The correction applies to both
+GENERAL and CUSTOMIZE cleans, over local and cloud Tuya transports.
+
+Regression tests decode the actual DPS 152 payload for single and multiple
+rooms, nonsequential IDs and room zero. All 16 T2080A command cases failed
+against the previous code and passed with the correction; six compatibility
+cases retain the existing order. Two coordinator tests confirm that local and
+cloud paths supply the model without an entity override. The full suite passes
+766 tests. This follow-up is tested offline and is not yet deployed to the
+owner's HA; it requires no HA restart for PR validation.
