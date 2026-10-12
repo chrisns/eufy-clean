@@ -155,5 +155,15 @@ rooms, nonsequential IDs and room zero. All 16 T2080A command cases failed
 against the previous code and passed with the correction; six compatibility
 cases retain the existing order. Two coordinator tests confirm that local and
 cloud paths supply the model without an entity override. The full suite passes
-766 tests. This follow-up is tested offline and is not yet deployed to the
-owner's HA; it requires no HA restart for PR validation.
+766 tests. On 2026-10-12, the owner requested deployment of runtime commit
+`1c125d1`. Only `api/commands.py` differed from the installed integration; it
+was backed up, replaced atomically and checked against the tested source hash.
+Decoding a command with the installed builder produced `[(6, 0), (2, 1)]`
+for requested rooms `[6, 2]`, without dispatching a room-clean job.
+
+One full HA restart loaded the Python change; entry reloads alone keep Python
+modules cached. HA returned to RUNNING, the Eufy entry was loaded, the robot was
+docked with no active error, and all eight rooms were available. The ten-retry
+automation remained enabled with its history unchanged. No Eufy startup errors
+were present in the new HA log. Physical room-targeting evidence remains the
+two owners' reports linked above, rather than a new clean on this robot.
